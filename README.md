@@ -389,4 +389,4 @@ that others interact with) must publish its source under the same license.
 
 ## Auteur / Author
 
-H. Soualmi
+H. Soualmi — [soualmih@gmail.com](mailto:soualmih@gmail.com)
