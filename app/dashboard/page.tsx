@@ -104,14 +104,17 @@ export default function Dashboard() {
           <span className="font-semibold">Algérie Feux Alerte</span>
           <span className="text-[#8da79d]">{updatedAt ? `dernière mise à jour ${new Date(updatedAt).toLocaleTimeString('fr-FR', { timeZone: 'Africa/Algiers', hour: '2-digit', minute: '2-digit' })}` : '…'}</span>
         </div>
-        <select
-          value={wilayaFilter}
-          onChange={e => setWilayaFilter(e.target.value)}
-          className="pointer-events-auto rounded-xl border border-white/10 bg-[#07120f]/90 px-3 py-2 text-xs backdrop-blur"
-        >
-          <option value="all">Toutes les wilayas</option>
-          {wilayas.map(w => <option key={w} value={w}>{w}</option>)}
-        </select>
+        <div className="pointer-events-auto flex items-center gap-2">
+          <select
+            value={wilayaFilter}
+            onChange={e => setWilayaFilter(e.target.value)}
+            className="rounded-xl border border-white/10 bg-[#07120f]/90 px-3 py-2 text-xs backdrop-blur"
+          >
+            <option value="all">Toutes les wilayas</option>
+            {wilayas.map(w => <option key={w} value={w}>{w}</option>)}
+          </select>
+          <a href="/setup" className="rounded-xl border border-white/10 bg-[#07120f]/90 px-3 py-2 text-xs text-[#8da79d] backdrop-blur hover:text-[#edf5ef]">Configuration</a>
+        </div>
       </div>
 
       {/* Side panel (desktop) / bottom sheet (mobile) */}

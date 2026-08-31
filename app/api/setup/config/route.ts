@@ -14,19 +14,15 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-import { eventsBetween, getConfig } from '@/lib/database';
 import { isAuthenticated } from '@/lib/dashboard-auth';
-import { toDashboardEvent } from '@/lib/dashboard-view';
+import { getConfig, initDb } from '@/lib/database';
+import { secretsConfigured } from '@/lib/env-secrets';
 
+// Returns the region/tunables config plus which secrets are set — as
+// booleans only, never the values themselves.
 export async function GET(request: Request) {
   if (!isAuthenticated(request)) return Response.json({ error: 'Non autorisé' }, { status: 401 });
-  const url = new URL(request.url);
-  const from = url.searchParams.get('from');
-  const to = url.searchParams.get('to');
-  if (!from || !to) return Response.json({ error: 'Paramètres from/to requis' }, { status: 400 });
-
-  const [events, config] = await Promise.all([eventsBetween(from, to), getConfig()]);
-  // Historical age is relative to the event's own detection time, not "now" —
-  // otherwise a week-old event would show a nonsensical multi-day age.
-  return Response.json({ events: events.map(e => toDashboardEvent(e, new Date(e.lastAcquiredAt), config.frpThresholdMw, config.proximityKm)) });
+  await initDb();
+  const config = await getConfig();
+  return Response.json({ config, secretsConfigured: secretsConfigured() });
 }

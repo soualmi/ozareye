@@ -53,19 +53,21 @@ export type FireEvent = {
 const villages = villagesData as { osm_id: string; name: string; name_ar: string | null; lat: number; lon: number; place: string; wilaya: string }[];
 
 const SOURCES = ['VIIRS_NOAA20_NRT', 'VIIRS_NOAA21_NRT', 'VIIRS_SNPP_NRT'];
-// Full northern forest belt: Moroccan border to Tunisian border, southern edge
-// around the Saharan Atlas (west,south,east,north). Widen further only with a
-// matching widen of the persistent-source guard below — going deeper south
-// multiplies the odds of catching gas flares and permanent industrial heat.
-const ALGERIA_BOX = '-2.5,34.0,9.0,37.3';
+// Fallback bbox (west,south,east,north) and tunable defaults — used only when
+// a caller doesn't pass its own value (tests, the replay script, and as the
+// seed values `lib/database.ts` migrates into the config table on first run).
+// The live monitor (app/api/monitor/route.ts) always passes its own values,
+// read from that config record, not these constants — see lib/database.ts
+// getConfig()/updateConfig() and README section 5.
+export const DEFAULT_BOX = '-2.5,34.0,9.0,37.3';
 
 // Persistent-source guard: a real wildfire burns out in days; a gas flare or
 // industrial heat source fires on the same ~1km cell over and over for months.
 // A cell seen on more than this many distinct days within the rolling window
 // is flagged a probable permanent source and suppressed (self-learning — no
 // hardcoded flare list to maintain).
-export const PERSISTENT_SOURCE_DAY_THRESHOLD = 10;
-export const PERSISTENT_SOURCE_WINDOW_DAYS = 30;
+export const DEFAULT_PERSISTENT_SOURCE_DAY_THRESHOLD = 10;
+export const DEFAULT_PERSISTENT_SOURCE_WINDOW_DAYS = 30;
 
 // ~1km resolution (0.01deg is ~1.1km of latitude at these latitudes; longitude
 // spacing shrinks moving north, but this is a coarse noise filter, not a survey).
@@ -79,7 +81,10 @@ const EXPOSURE_RADIUS_KM = 20;
 // A village this close to the fire is always named, regardless of wind
 // classification — at this range wind direction can shift, terrain deflects it,
 // and embers travel independently of the prevailing flow.
-const PROXIMITY_KM = 3;
+export const DEFAULT_PROXIMITY_KM = 3;
+// FRP (MW) at which a detection is scored as an intense, probably-extensive
+// signal rather than a modest one — see scoreEvent()/magnitudeLabel() below.
+export const DEFAULT_FRP_THRESHOLD_MW = 20;
 // Crude spread-rate rule of thumb for Mediterranean scrub/forest: the fire front
 // advances at roughly this fraction of the 10m wind speed. This is NOT a fire
 // physics model — treat every ETA it produces as a rough estimate, not a forecast.
@@ -93,9 +98,10 @@ const ESCALATION_SCORE_DELTA = 15;
 type SourceResult = { source: string; rows: Detection[] | null };
 
 // `box` and `date` let the replay script (Part D2) pull a historical day over a
-// narrower bbox; live monitoring uses the defaults (ALGERIA_BOX, today).
+// narrower bbox; live monitoring passes its own configured bbox explicitly —
+// DEFAULT_BOX here is only the fallback for callers that don't.
 export async function fetchDetections(mapKey: string, opts?: { box?: string; date?: string }): Promise<SourceResult[]> {
-  const box = opts?.box ?? ALGERIA_BOX;
+  const box = opts?.box ?? DEFAULT_BOX;
   const datePart = opts?.date ? `/${opts.date}` : '';
   return Promise.all(SOURCES.map(async (source): Promise<SourceResult> => {
     try {
@@ -184,7 +190,7 @@ function withinClusterWindow(ev: FireEvent, det: Detection): boolean {
   return ev.detections.some(d => hoursBetween(d.acquiredAt, det.acquiredAt) <= CLUSTER_TIME_HOURS);
 }
 
-export function clusterDetections(detections: Detection[], events: FireEvent[]): FireEvent[] {
+export function clusterDetections(detections: Detection[], events: FireEvent[], frpThresholdMw = DEFAULT_FRP_THRESHOLD_MW): FireEvent[] {
   for (const det of detections) {
     let best: FireEvent | null = null, bestDist = Infinity;
     for (const ev of events) {
@@ -206,7 +212,7 @@ export function clusterDetections(detections: Detection[], events: FireEvent[]):
       events.push(newEventFrom(det));
     }
   }
-  return mergeById(events).map(scoreEvent);
+  return mergeById(events).map(ev => scoreEvent(ev, frpThresholdMw));
 }
 
 // Defense in depth: if two fragments in this pass ever end up sharing an id
@@ -248,7 +254,7 @@ function mergeEvents(a: FireEvent, b: FireEvent): FireEvent {
  * adjacent pixels from the SAME single pass mean the fire is big, not that
  * it's confirmed — that's scored separately, honestly labelled as size.
  */
-function scoreEvent(event: FireEvent): FireEvent {
+function scoreEvent(event: FireEvent, frpThresholdMw = DEFAULT_FRP_THRESHOLD_MW): FireEvent {
   const passKeys = new Map<string, number>();
   for (const d of event.detections) {
     const key = `${d.satellite}|${d.acquiredAt}`;
@@ -264,7 +270,12 @@ function scoreEvent(event: FireEvent): FireEvent {
   let score = 25;
   if (confidenceRank(maxConfidence) === 2) { score += 25; evidence.push('Confiance satellite élevée'); evidenceShort.push('conf+'); }
   else if (confidenceRank(maxConfidence) === 1) score += 14;
-  if (maxFrp >= 20) score += 20; else if (maxFrp >= 8) score += 12; else if (maxFrp >= 3) score += 5;
+  // Same shape as before (three graduated bands), but the top band's cutoff —
+  // the "intense signal" line — is now the configurable frpThresholdMw
+  // instead of a hardcoded 20; the two lower bands scale with it so a
+  // self-hoster who lowers the threshold for a region with smaller/faster
+  // fires gets a correspondingly lower whole ladder, not just the top rung.
+  if (maxFrp >= frpThresholdMw) score += 20; else if (maxFrp >= frpThresholdMw * 0.4) score += 12; else if (maxFrp >= frpThresholdMw * 0.15) score += 5;
   evidence.push(`Puissance radiative max ${maxFrp.toFixed(1)} MW`);
   if (maxPixelsInSinglePass >= 3) { score += 10; evidence.push(`Feu étendu · ${maxPixelsInSinglePass} pixels dans un même passage (taille, pas confirmation)`); evidenceShort.push(`taille×${maxPixelsInSinglePass}`); }
   if (passCount > 1) { score += 25; evidence.push(`Recoupé par un passage/capteur différent (${passCount} passages distincts)`); evidenceShort.push('recoupé'); }
@@ -287,9 +298,9 @@ export function confidenceLabel(c: string): string {
 
 // Same FRP/size breakpoints scoreEvent uses to score the event — in words,
 // not a fabricated hectare figure this data can't support.
-export function magnitudeLabel(maxFrp: number, maxPixelsInSinglePass: number): string {
-  if (maxFrp >= 20 || maxPixelsInSinglePass >= 3) return 'signal intense, feu probablement étendu';
-  if (maxFrp >= 8) return 'signal modéré';
+export function magnitudeLabel(maxFrp: number, maxPixelsInSinglePass: number, frpThresholdMw = DEFAULT_FRP_THRESHOLD_MW): string {
+  if (maxFrp >= frpThresholdMw || maxPixelsInSinglePass >= 3) return 'signal intense, feu probablement étendu';
+  if (maxFrp >= frpThresholdMw * 0.4) return 'signal modéré';
   return 'signal faible, foyer localisé';
 }
 
@@ -400,9 +411,9 @@ export type VillageSelection = { village: VillageExposure; isProximity: boolean 
 // proximity always wins (max 2), downwind/marginal fills the rest (max 2).
 // Exported so the dashboard's detail view shows precisely what the alert did,
 // not a reimplementation that could quietly drift from it.
-export function selectExposedVillages(event: FireEvent): VillageSelection[] {
+export function selectExposedVillages(event: FireEvent, proximityKm = DEFAULT_PROXIMITY_KM): VillageSelection[] {
   const all = event.villages ?? [];
-  const proximity = all.filter(v => v.distanceKm <= PROXIMITY_KM).sort((a, b) => a.distanceKm - b.distanceKm).slice(0, 2);
+  const proximity = all.filter(v => v.distanceKm <= proximityKm).sort((a, b) => a.distanceKm - b.distanceKm).slice(0, 2);
   const proximityIds = new Set(proximity.map(v => v.osm_id));
   const downwind = all.filter(v => v.relation !== 'upwind' && !proximityIds.has(v.osm_id))
     .sort((a, b) => (a.relation === b.relation ? a.distanceKm - b.distanceKm : a.relation === 'downwind' ? -1 : 1))
@@ -434,9 +445,9 @@ export const LABELS = {
   noVillage: 'Pas de village <20km sous le vent',
 };
 
-export function telegramText(event: FireEvent, referenceTime = new Date()) {
+export function telegramText(event: FireEvent, referenceTime = new Date(), proximityKm = DEFAULT_PROXIMITY_KM) {
   const icon = event.status === 'urgent' ? '🔴' : '🟠';
-  const shown = selectExposedVillages(event);
+  const shown = selectExposedVillages(event, proximityKm);
 
   const villageLines = shown.length
     ? shown.map(({ village: v, isProximity }) => {

@@ -16,9 +16,10 @@
 
 import {
   ALERT_SCORE_THRESHOLD, clusterDetections, enrichWeather, eventWilaya, fetchDetections, gridCell, telegramText,
-  PERSISTENT_SOURCE_DAY_THRESHOLD, PERSISTENT_SOURCE_WINDOW_DAYS, type Detection, type FireEvent,
+  DEFAULT_PERSISTENT_SOURCE_WINDOW_DAYS, type Detection, type FireEvent,
 } from '@/lib/fire-monitor';
-import { activeEvents, distinctDayCount, initDb, isFirstRun, pruneHotspotHistory, recordDetectionDay, saveSignal } from '@/lib/database';
+import { activeEvents, distinctDayCount, getConfig, initDb, isFirstRun, pruneHotspotHistory, recordDetectionDay, saveSignal } from '@/lib/database';
+import { bboxToString } from '@/scripts/build-villages';
 import { chatIdForWilaya } from '@/lib/wilaya-routing';
 import { appendRunLog } from '@/lib/run-log';
 
@@ -34,11 +35,12 @@ function shouldAlert(event: FireEvent) {
 }
 
 // Records every detection's (cell, day) and drops detections from cells that
-// have shown up on more than PERSISTENT_SOURCE_DAY_THRESHOLD distinct days in
-// the rolling window — a real wildfire doesn't keep re-igniting the same 1km
-// spot for weeks; a gas flare or industrial heat source does.
-async function suppressPersistentSources(detections: Detection[]): Promise<{ kept: Detection[]; suppressed: number }> {
-  const cutoff = new Date(Date.now() - PERSISTENT_SOURCE_WINDOW_DAYS * 86_400_000).toISOString().slice(0, 10);
+// have shown up on more than persistentSourceDays distinct days in the
+// rolling window — a real wildfire doesn't keep re-igniting the same 1km spot
+// for weeks; a gas flare or industrial heat source does. persistentSourceDays
+// comes from the region config (/setup); the window itself stays fixed.
+async function suppressPersistentSources(detections: Detection[], persistentSourceDays: number): Promise<{ kept: Detection[]; suppressed: number }> {
+  const cutoff = new Date(Date.now() - DEFAULT_PERSISTENT_SOURCE_WINDOW_DAYS * 86_400_000).toISOString().slice(0, 10);
   await pruneHotspotHistory(cutoff);
 
   const cellDays = new Map<string, Set<string>>();
@@ -53,7 +55,7 @@ async function suppressPersistentSources(detections: Detection[]): Promise<{ kep
   const persistentCells = new Set<string>();
   for (const cell of cellDays.keys()) {
     const count = await distinctDayCount(cell, cutoff);
-    if (count > PERSISTENT_SOURCE_DAY_THRESHOLD) persistentCells.add(cell);
+    if (count > persistentSourceDays) persistentCells.add(cell);
   }
 
   const kept: Detection[] = [];
@@ -71,12 +73,16 @@ export async function POST(request: Request) {
   const mapKey = process.env.FIRMS_MAP_KEY, botToken = process.env.TELEGRAM_BOT_TOKEN, chatId = process.env.TELEGRAM_CHAT_ID;
   if (!mapKey || !botToken || !chatId) return Response.json({ error: 'Variables FIRMS/Telegram manquantes' }, { status: 503 });
   await initDb();
+  // Region + tunables come from the /setup config record, not hardcoded
+  // constants — see lib/database.ts getConfig()/updateConfig(). A fresh
+  // instance gets the migrated Algeria defaults here until /setup changes them.
+  const config = await getConfig();
 
   const firstRun = await isFirstRun();
-  const sourceResults = await fetchDetections(mapKey);
+  const sourceResults = await fetchDetections(mapKey, { box: bboxToString(config.bbox) });
   const rawDetections = sourceResults.flatMap(r => r.rows ?? []);
-  const { kept: detections, suppressed } = await suppressPersistentSources(rawDetections);
-  const events = clusterDetections(detections, await activeEvents());
+  const { kept: detections, suppressed } = await suppressPersistentSources(rawDetections, config.persistentSourceDays);
+  const events = clusterDetections(detections, await activeEvents(), config.frpThresholdMw);
 
   const sourcesLog = sourceResults.map(r => ({ source: r.source, rows: r.rows === null ? 'FAILED' : r.rows.length }));
 
@@ -97,7 +103,7 @@ export async function POST(request: Request) {
     if (shouldAlert(event)) {
       const wilaya = eventWilaya(event);
       const destination = chatIdForWilaya(wilaya, chatId);
-      const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id: destination, text: telegramText(event), disable_web_page_preview: true }) });
+      const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id: destination, text: telegramText(event, undefined, config.proximityKm), disable_web_page_preview: true }) });
       if (response.ok) {
         event.notifiedAt = new Date().toISOString(); event.notifiedScore = event.score; event.notifiedStatus = event.status; sent++;
         const key = wilaya ?? 'inconnue';

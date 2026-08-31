@@ -88,3 +88,12 @@ export function wilayaAt(lat: number, lon: number): string | null {
 export function allWilayaNames(): string[] {
   return loadWilayas().map(w => w.name).sort((a, b) => a.localeCompare(b, 'fr'));
 }
+
+// Called by the /setup region build after it overwrites data/wilayas.geojson
+// with a new country's boundaries, so the running server picks up the new
+// polygons on its very next lookup instead of serving the previous country's
+// cached shapes until restarted. wilayaAt()/allWilayaNames() still don't care
+// whose boundaries they're reading — this only forces the next call to reload.
+export function invalidateWilayaCache(): void {
+  cache = null;
+}

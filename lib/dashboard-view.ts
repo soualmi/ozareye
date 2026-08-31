@@ -24,7 +24,13 @@ import {
   type FireEvent,
 } from './fire-monitor';
 
-export function toDashboardEvent(event: FireEvent, referenceTime: Date = new Date()) {
+// frpThresholdMw/proximityKm default to the engine's own defaults but should
+// normally be passed in from the current config (see /api/dashboard/events
+// and /history) — so an event's dashboard presentation (magnitude wording,
+// which villages are "proximity" vs "downwind") matches the same tunables
+// currently configured, not a value frozen at whatever they were when this
+// function was written.
+export function toDashboardEvent(event: FireEvent, referenceTime: Date = new Date(), frpThresholdMw?: number, proximityKm?: number) {
   const last = event.detections[event.detections.length - 1];
   return {
     id: event.id,
@@ -37,10 +43,10 @@ export function toDashboardEvent(event: FireEvent, referenceTime: Date = new Dat
     windKph: event.windKph, windDirectionFromDeg: event.windDirectionFromDeg, humidity: event.humidity,
     passCount: event.passCount, maxPixelsInSinglePass: event.maxPixelsInSinglePass,
     confidenceLabel: confidenceLabel(event.maxConfidence),
-    magnitude: magnitudeLabel(event.maxFrp, event.maxPixelsInSinglePass),
+    magnitude: magnitudeLabel(event.maxFrp, event.maxPixelsInSinglePass, frpThresholdMw),
     passes: distinctPasses(event).map(p => ({ ...p, acquiredAtAlgiers: algiersTime(p.acquiredAt) })),
     evidenceShort: event.evidenceShort,
-    selection: selectExposedVillages(event),
+    selection: selectExposedVillages(event, proximityKm),
     disclaimer: LABELS.disclaimer,
   };
 }
