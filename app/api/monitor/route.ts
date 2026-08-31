@@ -68,8 +68,25 @@ async function suppressPersistentSources(detections: Detection[], persistentSour
   return { kept, suppressed };
 }
 
-export async function POST(request: Request) {
-  if (!process.env.MONITOR_SECRET || request.headers.get('x-monitor-secret') !== process.env.MONITOR_SECRET) return Response.json({ error: 'Non autorisé' }, { status: 401 });
+// Two independent credentials, either one sufficient — never removed, only
+// added to. The VPS/systemd cron (scripts/run-monitor.sh) sends
+// `x-monitor-secret` on a POST, exactly as before. Vercel Cron Jobs always
+// call via GET and cannot send a custom header, but automatically attach
+// `Authorization: Bearer ${CRON_SECRET}` when CRON_SECRET is set as a
+// project env var — Vercel's own documented pattern for securing cron
+// routes (vercel.com/docs/cron-jobs/manage-cron-jobs#securing-cron-jobs).
+// Both env vars are optional independently; a request is authorized if it
+// presents a value that matches whichever secret is actually configured.
+function isAuthorized(request: Request): boolean {
+  const monitorSecret = process.env.MONITOR_SECRET;
+  if (monitorSecret && request.headers.get('x-monitor-secret') === monitorSecret) return true;
+  const cronSecret = process.env.CRON_SECRET;
+  if (cronSecret && request.headers.get('authorization') === `Bearer ${cronSecret}`) return true;
+  return false;
+}
+
+async function runMonitor(request: Request): Promise<Response> {
+  if (!isAuthorized(request)) return Response.json({ error: 'Non autorisé' }, { status: 401 });
   const mapKey = process.env.FIRMS_MAP_KEY, botToken = process.env.TELEGRAM_BOT_TOKEN, chatId = process.env.TELEGRAM_CHAT_ID;
   if (!mapKey || !botToken || !chatId) return Response.json({ error: 'Variables FIRMS/Telegram manquantes' }, { status: 503 });
   await initDb();
@@ -114,4 +131,15 @@ export async function POST(request: Request) {
   }
   appendRunLog({ sources: sourcesLog, events: events.length, sent, alertsPerWilaya, suppressed: { persistent_source: suppressed } });
   return Response.json({ ok: true, events: events.length, sent, checkedAt: new Date().toISOString() });
+}
+
+// VPS/systemd cron (scripts/run-monitor.sh) — unchanged.
+export async function POST(request: Request) {
+  return runMonitor(request);
+}
+
+// Vercel Cron Jobs — always invoke via GET (vercel.json's "crons" entry),
+// never POST. Same auth, same logic, same response shape as POST.
+export async function GET(request: Request) {
+  return runMonitor(request);
 }

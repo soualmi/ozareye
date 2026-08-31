@@ -1,0 +1,87 @@
+// Algérie Feux Alerte
+// Copyright (C) 2026 H. Soualmi
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+// The one contract lib/db/sqlite.ts and lib/db/postgres.ts both implement.
+// lib/database.ts (the public module the rest of the app imports from) just
+// picks one of the two at startup and delegates every call to it — neither
+// the engine nor any route ever imports this file or a backend directly, so
+// dialect differences (placeholders, upsert syntax, INSERT OR IGNORE vs
+// ON CONFLICT DO NOTHING, ...) stay fully inside each backend module.
+import type { FireEvent } from '../fire-monitor';
+import { DEFAULT_BOX, DEFAULT_FRP_THRESHOLD_MW, DEFAULT_PROXIMITY_KM, DEFAULT_PERSISTENT_SOURCE_DAY_THRESHOLD } from '../fire-monitor';
+
+export type VillageBuildStatus =
+  | { status: 'idle' }
+  | { status: 'running'; startedAt: string; step: string }
+  | { status: 'success'; startedAt: string; finishedAt: string; villageCount: number; perRegion: Record<string, number>; droppedOutsideBoundary: number; adminBoundariesOk: boolean; adminBoundariesError?: string }
+  | { status: 'error'; startedAt: string; finishedAt: string; error: string };
+
+export type EngineConfig = {
+  countryName: string;
+  countryIso2: string;
+  countryIso3: string;
+  bbox: { west: number; south: number; east: number; north: number };
+  frpThresholdMw: number;
+  proximityKm: number;
+  persistentSourceDays: number;
+  configured: boolean;
+  villageBuildStatus: VillageBuildStatus;
+};
+
+export type ConfigPatch = Partial<Omit<EngineConfig, 'bbox' | 'villageBuildStatus'>> & {
+  bbox?: Partial<EngineConfig['bbox']>;
+  villageBuildStatus?: VillageBuildStatus;
+};
+
+export interface Backend {
+  initDb(): Promise<void>;
+  saveSignal(event: FireEvent): Promise<void>;
+  markNotified(id: string): Promise<void>;
+  wasNotified(id: string): Promise<boolean>;
+  latestSignals(): Promise<FireEvent[]>;
+  activeEvents(sinceHours?: number): Promise<FireEvent[]>;
+  isFirstRun(): Promise<boolean>;
+  clearFireHistory(): Promise<void>;
+  recordDetectionDay(cell: string, day: string): Promise<void>;
+  distinctDayCount(cell: string, sinceDay: string): Promise<number>;
+  pruneHotspotHistory(beforeDay: string): Promise<void>;
+  eventsSince(sinceIso: string, limit?: number): Promise<FireEvent[]>;
+  eventsBetween(fromIso: string, toIso: string, limit?: number): Promise<FireEvent[]>;
+  getConfig(): Promise<EngineConfig>;
+  updateConfig(patch: ConfigPatch): Promise<EngineConfig>;
+}
+
+// The values this instance already shipped and ran with before /setup or
+// Postgres support existed — both backends migrate this in verbatim on the
+// very first getConfig() call against an empty config table, so an existing
+// SQLite deployment (or a brand new Postgres one seeded fresh) keeps working
+// unchanged. See README section 5 for what these used to be hardcoded as:
+// DEFAULT_BOX, DEFAULT_PROXIMITY_KM, DEFAULT_FRP_THRESHOLD_MW,
+// DEFAULT_PERSISTENT_SOURCE_DAY_THRESHOLD.
+export function algeriaSeedConfig(readVillageCount: () => number): EngineConfig {
+  const villageCount = readVillageCount();
+  const now = new Date().toISOString();
+  const [west, south, east, north] = DEFAULT_BOX.split(',').map(Number);
+  return {
+    countryName: 'Algérie', countryIso2: 'DZ', countryIso3: 'DZA',
+    bbox: { west, south, east, north },
+    frpThresholdMw: DEFAULT_FRP_THRESHOLD_MW, proximityKm: DEFAULT_PROXIMITY_KM, persistentSourceDays: DEFAULT_PERSISTENT_SOURCE_DAY_THRESHOLD,
+    configured: true,
+    villageBuildStatus: villageCount > 0
+      ? { status: 'success', startedAt: now, finishedAt: now, villageCount, perRegion: {}, droppedOutsideBoundary: 0, adminBoundariesOk: true }
+      : { status: 'idle' },
+  };
+}
