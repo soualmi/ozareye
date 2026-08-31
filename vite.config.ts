@@ -1,13 +1,37 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { sites } from '@openai/sites-vite-plugin';
 import tailwindcss from '@tailwindcss/postcss';
 import vinext from 'vinext';
 import { defineConfig } from 'vite';
-import hostingConfig from './.openai/hosting.json';
 
 const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
   '00000000-0000-4000-8000-000000000000';
 
-const { d1, r2 } = hostingConfig;
+// .openai/hosting.json is a local, git-ignored hosting artifact from this
+// project's original Cloudflare-hosted scaffold — absent on a fresh clone or
+// a non-Cloudflare (e.g. self-hosted VPS) deployment. Read it defensively
+// instead of a static import, so this config doesn't hard-fail when it's
+// missing (d1/r2 unset just means the Cloudflare D1/R2 bindings below stay
+// disabled, which is already correct for a non-Cloudflare deploy) — and
+// write the fallback to disk when absent, because @openai/sites-vite-plugin's
+// `sites()` plugin (below) separately `cp`s this exact file into dist/.openai
+// during `closeBundle`, unconditionally, outside of this config file's own
+// import. An in-memory-only fallback here would still leave that copy step
+// failing on a fresh clone.
+const hostingConfigPath = path.join(process.cwd(), '.openai', 'hosting.json');
+function readHostingConfig(): { d1?: string | null; r2?: string | null } {
+  try {
+    return JSON.parse(fs.readFileSync(hostingConfigPath, 'utf8'));
+  } catch {
+    const fallback = { project_id: 'self-hosted', d1: null, r2: null };
+    fs.mkdirSync(path.dirname(hostingConfigPath), { recursive: true });
+    fs.writeFileSync(hostingConfigPath, JSON.stringify(fallback, null, 2) + '\n');
+    return fallback;
+  }
+}
+
+const { d1, r2 } = readHostingConfig();
 
 // macOS Seatbelt blocks FSEvents, so Codex previews need polling for HMR.
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === 'seatbelt';

@@ -103,30 +103,7 @@ cp .env.example .env.local
 
 Generate a reasonable `MONITOR_SECRET` with e.g. `openssl rand -hex 32`.
 
-### 4.2 A required placeholder file
-
-The build tooling (`vite.config.ts`) still imports `./.openai/hosting.json`,
-a leftover from the project's original Cloudflare-hosted scaffold. That file
-is git-ignored (it's a local hosting artifact, not app config) — which means
-a fresh clone is **missing a file the build needs to even start**. Create a
-minimal placeholder before building:
-
-```bash
-mkdir -p .openai
-cat > .openai/hosting.json <<'EOF'
-{
-  "project_id": "self-hosted",
-  "d1": null,
-  "r2": null
-}
-EOF
-```
-
-`d1: null` / `r2: null` correctly disable the unused Cloudflare bindings —
-this app doesn't use Cloudflare D1 or R2 at runtime, this file just needs to
-exist for the build step to resolve its import.
-
-### 4.3 Build
+### 4.2 Build
 
 ```bash
 npm run build
@@ -134,11 +111,15 @@ npm run build
 
 This runs `vinext build` (the app is built on
 [vinext](https://github.com/cloudflare/vinext), a Vite-based Next.js-compatible
-toolchain) and produces a `dist/` directory.
+toolchain) and produces a `dist/` directory. `vite.config.ts` also references a
+local `.openai/hosting.json` hosting artifact left over from this project's
+original Cloudflare-hosted scaffold (unrelated to your `.env.local`) — it's
+git-ignored, and the build creates a harmless local placeholder for it
+automatically if it's missing, so there's nothing to do here.
 Run the test suite first if you want confidence before deploying — see
-section 4.6.
+section 4.5.
 
-### 4.4 Run it as a systemd service
+### 4.3 Run it as a systemd service
 
 Create `/etc/systemd/system/algerie-feux.service` (adjust `WorkingDirectory`
 and the `node` path to match your install):
@@ -160,7 +141,7 @@ Environment=NODE_ENV=production
 WantedBy=multi-user.target
 ```
 
-`vinext start` serves the `dist/` output built in step 4.3 — it does not
+`vinext start` serves the `dist/` output built in step 4.2 — it does not
 rebuild on its own; re-run `npm run build` and restart the service after any
 code change. It reads `.env.local` from its working directory the same way
 `npm run dev` does.
@@ -174,7 +155,7 @@ sudo systemctl status algerie-feux
 The `--hostname 127.0.0.1` binds it to localhost only — see
 [section 6](#6-the-dashboard) for why, and how to actually reach it.
 
-### 4.5 Install the cron trigger
+### 4.4 Install the cron trigger
 
 The monitor doesn't poll on its own — something has to call
 `POST /api/monitor` on a schedule. `scripts/run-monitor.sh` does that, reading
@@ -202,7 +183,7 @@ very first run against an empty database, the monitor seeds its history from
 whatever's currently in the feed **without sending any alerts** — that's
 expected, not a bug.
 
-### 4.6 Run the tests
+### 4.5 Run the tests
 
 ```bash
 npm run test        # all four suites below
@@ -212,7 +193,7 @@ npm run test:wilaya
 npm run test:clustering
 ```
 
-### 4.7 Try a historical replay before going live
+### 4.6 Try a historical replay before going live
 
 Shows the exact Telegram messages the engine would have produced for a past
 day, without sending anything — useful to sanity-check scoring and village
@@ -254,25 +235,29 @@ the effort before starting:
 
 3. **The village index.** `data/villages.json` (9,635 entries for Algeria) is
    a flat array of `{osm_id, name, name_ar, lat, lon, place, wilaya}`, built
-   **once, offline** by `scripts/build-village-index.ts` from a raw
-   [Overpass API](https://overpass-turbo.eu/) query result — the running app
-   never queries Overpass itself. To rebuild for a new region:
-   - Run an Overpass query for `place` nodes (village/town/hamlet) inside
-     your target area, e.g. via [overpass-turbo.eu](https://overpass-turbo.eu/):
-     ```
-     [out:json][timeout:120];
-     area["ISO3166-1"="XX"][admin_level=2]->.a;
-     node["place"~"^(city|town|village|hamlet)$"](area.a);
-     out body;
-     ```
-     (replace `XX` with your country's ISO code), export the result as raw
-     JSON.
-   - Run `npx tsx scripts/build-village-index.ts <path-to-overpass-result.json>`.
-     It resolves each node's wilaya via `lib/wilaya.ts`/`data/wilayas.geojson`
-     — so you need step 2 done first — and refuses to overwrite the existing
-     index if the result is empty or malformed, to avoid ever shipping a
-     half-built one.
-   - Re-run the test suite and a replay (section 4.7) against known past fires
+   **once, offline** from OpenStreetMap — the running app never queries
+   OpenStreetMap or Overpass itself at request time. To rebuild it for a new
+   region (or refresh Algeria's), run `scripts/build-villages.ts`, which
+   queries the public [Overpass API](https://overpass-api.de/) live for
+   `place` nodes (city/town/village/hamlet) in a bounding box and attributes
+   each one to a region via `lib/wilaya.ts`/`data/wilayas.geojson` — so you
+   need step 2 done first:
+   ```bash
+   npx tsx scripts/build-villages.ts <west,south,east,north> [output-path]
+   # e.g. a small test run over just central Béjaïa:
+   npx tsx scripts/build-villages.ts 5.03,36.73,5.10,36.79 /tmp/villages-test.json
+   ```
+   It refuses to write anything if the query returns zero villages inside any
+   boundary, to avoid ever shipping a half-built index — try a small bbox
+   first (as above) before running it over an entire country, both to sanity
+   check the output and because Overpass's public instance rate-limits and
+   times out large queries. `scripts/build-village-index.ts` is the older,
+   lower-level counterpart: it does the same transform and wilaya attribution
+   but reads an already-fetched raw Overpass JSON dump instead of querying
+   the network itself — useful if you already have one (e.g. exported from
+   [overpass-turbo.eu](https://overpass-turbo.eu/) with a custom query) or
+   want to avoid depending on the public Overpass API being up.
+   - Re-run the test suite and a replay (section 4.6) against known past fires
      in your area to sanity-check the new index before trusting it live.
 
 ## 6. The dashboard
@@ -282,7 +267,7 @@ shows live and historical events on a Leaflet map, with per-event detail and
 a wilaya filter. It's a read-only view over the same SQLite data the monitor
 writes.
 
-The systemd unit in section 4.4 binds it to `--hostname 127.0.0.1` —
+The systemd unit in section 4.3 binds it to `--hostname 127.0.0.1` —
 **localhost only, not reachable from the network.** That's deliberate: there
 is no rate limiting on the login endpoint and no TLS, so it is not meant to
 be exposed to the public internet as-is. Reach it over SSH port forwarding
