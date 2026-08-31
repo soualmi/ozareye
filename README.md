@@ -347,3 +347,7 @@ Read this before you point it at anything real:
 **License:** [AGPL-3.0](LICENSE) — free to use and modify, but any distributed
 or network-hosted version of this code (including running your own instance
 that others interact with) must publish its source under the same license.
+
+## Auteur / Author
+
+H. Soualmi
