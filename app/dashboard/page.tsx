@@ -2,6 +2,7 @@
 
 import dynamic from 'next/dynamic';
 import { useEffect, useMemo, useState } from 'react';
+import EventDetail from '@/components/dashboard/EventDetail';
 import type { DashboardEvent } from '@/components/dashboard/types';
 
 const DashboardMap = dynamic(() => import('@/components/dashboard/Map'), { ssr: false, loading: () => <div className="grid h-full place-items-center text-sm text-[#8da79d]">Chargement de la carte…</div> });
@@ -17,6 +18,7 @@ export default function Dashboard() {
   const [wilayas, setWilayas] = useState<string[]>([]);
   const [wilayaFilter, setWilayaFilter] = useState('all');
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [detailId, setDetailId] = useState<string | null>(null);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
   const [panelOpen, setPanelOpen] = useState(true);
 
@@ -64,14 +66,20 @@ export default function Dashboard() {
   }
 
   const visible = tab === 'live' ? events : historyEvents;
-  const selected = useMemo(() => visible.find(e => e.id === selectedId) ?? null, [visible, selectedId]);
+  const detailEvent = useMemo(() => visible.find(e => e.id === detailId) ?? null, [visible, detailId]);
+
+  // Clicking a marker just selects it (popup + village markers/wind arrow on the
+  // map — the glance layer). Clicking a list row, or "Plus de détails" in the
+  // popup, opens the full narrative panel (the deep layer).
+  function selectOnly(id: string) { setSelectedId(id); }
+  function showDetail(id: string) { setSelectedId(id); setDetailId(id); setPanelOpen(true); }
 
   if (!authChecked) return <div className="grid h-screen place-items-center bg-[#07120f] text-sm text-[#8da79d]">Vérification de session…</div>;
 
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-[#07120f] text-[#edf5ef]">
       <div className="absolute inset-0">
-        <DashboardMap events={tab === 'live' ? events : historyEvents} selectedId={selectedId} onSelect={id => { setSelectedId(id); setPanelOpen(true); }} />
+        <DashboardMap events={tab === 'live' ? events : historyEvents} selectedId={selectedId} onSelect={selectOnly} onDetail={showDetail} />
       </div>
 
       {/* Top bar */}
@@ -101,8 +109,8 @@ export default function Dashboard() {
         </button>
 
         <div className="flex border-b border-white/10 text-xs">
-          <button onClick={() => { setTab('live'); setSelectedId(null); }} className={`flex-1 py-2.5 font-medium ${tab === 'live' ? 'text-[#63dda0]' : 'text-[#8da79d]'}`}>En direct</button>
-          <button onClick={() => { setTab('history'); setSelectedId(null); }} className={`flex-1 py-2.5 font-medium ${tab === 'history' ? 'text-[#63dda0]' : 'text-[#8da79d]'}`}>Historique</button>
+          <button onClick={() => { setTab('live'); setSelectedId(null); setDetailId(null); }} className={`flex-1 py-2.5 font-medium ${tab === 'live' ? 'text-[#63dda0]' : 'text-[#8da79d]'}`}>En direct</button>
+          <button onClick={() => { setTab('history'); setSelectedId(null); setDetailId(null); }} className={`flex-1 py-2.5 font-medium ${tab === 'history' ? 'text-[#63dda0]' : 'text-[#8da79d]'}`}>Historique</button>
         </div>
 
         {tab === 'history' && (
@@ -115,10 +123,10 @@ export default function Dashboard() {
         )}
 
         <div className="flex-1 overflow-y-auto">
-          {selected ? (
-            <EventDetail event={selected} onBack={() => setSelectedId(null)} />
+          {detailEvent ? (
+            <EventDetail event={detailEvent} onBack={() => setDetailId(null)} />
           ) : (
-            <EventList events={visible} onSelect={setSelectedId} />
+            <EventList events={visible} onSelect={showDetail} />
           )}
         </div>
       </div>
@@ -149,11 +157,3 @@ function EventList({ events, onSelect }: { events: DashboardEvent[]; onSelect: (
   );
 }
 
-function EventDetail({ event, onBack }: { event: DashboardEvent; onBack: () => void }) {
-  return (
-    <div className="p-3">
-      <button onClick={onBack} className="mb-3 text-xs text-[#8da79d] hover:text-white">← Retour à la liste</button>
-      <pre className="whitespace-pre-wrap rounded-xl border border-white/10 bg-[#07130f] p-3 text-xs leading-relaxed">{event.telegramText}</pre>
-    </div>
-  );
-}

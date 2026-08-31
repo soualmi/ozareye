@@ -14,7 +14,8 @@
     "test:wind": "tsx --test lib/wind.test.ts",
     "test:labels": "tsx --test lib/labels.test.ts",
     "test:wilaya": "tsx --test lib/wilaya.test.ts",
-    "test": "tsx --test lib/wind.test.ts lib/labels.test.ts lib/wilaya.test.ts",
+    "test:clustering": "tsx --test lib/clustering.test.ts",
+    "test": "tsx --test lib/wind.test.ts lib/labels.test.ts lib/wilaya.test.ts lib/clustering.test.ts",
     "replay": "tsx scripts/replay.ts"
   },
   "dependencies": {

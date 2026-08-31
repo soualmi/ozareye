@@ -3,6 +3,8 @@ export type VillageBase = { osm_id: string; name: string; name_ar: string | null
 
 export type VillageExposure = VillageBase & { distanceKm: number; relation: 'downwind' | 'marginal' | 'upwind'; etaHours?: number };
 
+export type PassInfo = { satellite: string; instrument: string; acquiredAt: string; acquiredAtAlgiers: string };
+
 export type DashboardEvent = {
   id: string;
   latitude: number; longitude: number;
@@ -10,9 +12,12 @@ export type DashboardEvent = {
   status: 'observation' | 'corroborated' | 'urgent';
   score: number;
   maxFrp: number; instrument: string; satellite: string;
-  detectedAtIso: string; detectedAtAlgiers: string;
-  windKph?: number; windDirectionFromDeg?: number;
+  detectedAtIso: string; detectedAtAlgiers: string; ageMinutes: number;
+  windKph?: number; windDirectionFromDeg?: number; humidity?: number;
+  passCount: number; maxPixelsInSinglePass: number;
+  confidenceLabel: string; magnitude: string;
+  passes: PassInfo[];
   evidenceShort: string[];
   selection: { village: VillageExposure; isProximity: boolean }[];
-  telegramText: string;
+  disclaimer: string;
 };

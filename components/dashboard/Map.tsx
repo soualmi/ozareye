@@ -3,8 +3,10 @@
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 import { useEffect, useRef, useState } from 'react';
-import { MapContainer, Marker, Polyline, TileLayer, Tooltip, useMap, useMapEvents } from 'react-leaflet';
+import { MapContainer, Marker, Polyline, Popup, TileLayer, Tooltip, useMap, useMapEvents } from 'react-leaflet';
 import { blowsTowardDeg } from '@/lib/wind';
+import { formatAge } from './format';
+import Legend from './Legend';
 import type { DashboardEvent, VillageBase } from './types';
 
 const VILLAGE_ZOOM_THRESHOLD = 11;
@@ -97,16 +99,46 @@ function ExtraVillages({ selectedEvent }: { selectedEvent: DashboardEvent | null
   );
 }
 
-export default function DashboardMap({ events, selectedId, onSelect }: {
+// The compact "glance" popup — full narrative lives in the detail panel,
+// opened only via the "Plus de détails" button here.
+function FirePopup({ event, onDetail }: { event: DashboardEvent; onDetail: (id: string) => void }) {
+  const proximityCount = event.selection.filter(s => s.isProximity).length;
+  const downwindCount = event.selection.filter(s => !s.isProximity).length;
+  const nearest = event.selection[0]?.village.name;
+  const magnitudeShort = event.magnitude.split(',')[0];
+  return (
+    <div style={{ fontSize: 12, lineHeight: 1.5, minWidth: 180 }}>
+      <strong>Anomalie thermique — probablement un feu</strong>
+      <div>{[nearest, event.wilaya].filter(Boolean).join(' · ') || 'Localisation inconnue'}</div>
+      <div>{capitalize(magnitudeShort)}</div>
+      <div>Détectée il y a {formatAge(event.ageMinutes)}</div>
+      <div>{proximityCount} village(s) à proximité, {downwindCount} sous le vent</div>
+      <button
+        onClick={() => onDetail(event.id)}
+        style={{ marginTop: 6, width: '100%', border: 'none', borderRadius: 6, background: '#45d892', color: '#062017', fontWeight: 600, padding: '5px 8px', cursor: 'pointer' }}
+      >
+        Plus de détails →
+      </button>
+    </div>
+  );
+}
+
+function capitalize(s: string) {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+export default function DashboardMap({ events, selectedId, onSelect, onDetail }: {
   events: DashboardEvent[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  onDetail: (id: string) => void;
 }) {
   const selectedEvent = events.find(e => e.id === selectedId) ?? null;
   const flyTarget = useRef<[number, number] | null>(null);
   if (selectedEvent) flyTarget.current = [selectedEvent.latitude, selectedEvent.longitude];
 
   return (
+    <div className="relative h-full w-full">
     <MapContainer center={[36.4, 5.0]} zoom={8} style={{ height: '100%', width: '100%' }} preferCanvas>
       <TileLayer
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
@@ -120,12 +152,19 @@ export default function DashboardMap({ events, selectedId, onSelect }: {
           eventHandlers={{ click: () => onSelect(ev.id) }}
         >
           <Tooltip direction="top">{ev.wilaya ?? 'Wilaya inconnue'} · FRP {ev.maxFrp.toFixed(1)}MW</Tooltip>
+          <Popup><FirePopup event={ev} onDetail={onDetail} /></Popup>
         </Marker>
       ))}
 
       {selectedEvent && selectedEvent.selection.map(({ village, isProximity }) => (
         <Marker key={village.osm_id} position={[village.lat, village.lon]} icon={villageIcon(isProximity)}>
           <Tooltip direction="top" permanent>{village.name}</Tooltip>
+          <Popup>
+            <div style={{ fontSize: 12 }}>
+              <strong>{village.name}</strong><br />
+              {village.distanceKm.toFixed(1)}km · {isProximity ? 'à proximité' : 'sous le vent'}
+            </div>
+          </Popup>
         </Marker>
       ))}
       {selectedEvent && selectedEvent.selection.map(({ village }) => (
@@ -149,5 +188,7 @@ export default function DashboardMap({ events, selectedId, onSelect }: {
       <ExtraVillages selectedEvent={selectedEvent} />
       <FlyTo target={selectedId ? flyTarget.current : null} />
     </MapContainer>
+    <Legend />
+    </div>
   );
 }

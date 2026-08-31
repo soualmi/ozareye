@@ -1,22 +1,6 @@
 import { eventsBetween } from '@/lib/database';
 import { isAuthenticated } from '@/lib/dashboard-auth';
-import { algiersTime, eventWilaya, selectExposedVillages, telegramText, type FireEvent } from '@/lib/fire-monitor';
-
-function toDashboardEvent(event: FireEvent) {
-  const last = event.detections[event.detections.length - 1];
-  return {
-    id: event.id,
-    latitude: event.latitude, longitude: event.longitude,
-    wilaya: eventWilaya(event),
-    status: event.status, score: event.score,
-    maxFrp: event.maxFrp, instrument: last.instrument, satellite: last.satellite,
-    detectedAtIso: event.lastAcquiredAt, detectedAtAlgiers: algiersTime(event.lastAcquiredAt),
-    windKph: event.windKph, windDirectionFromDeg: event.windDirectionFromDeg,
-    evidenceShort: event.evidenceShort,
-    selection: selectExposedVillages(event),
-    telegramText: telegramText(event, new Date(event.lastAcquiredAt)),
-  };
-}
+import { toDashboardEvent } from '@/lib/dashboard-view';
 
 export async function GET(request: Request) {
   if (!isAuthenticated(request)) return Response.json({ error: 'Non autorisé' }, { status: 401 });
@@ -26,5 +10,7 @@ export async function GET(request: Request) {
   if (!from || !to) return Response.json({ error: 'Paramètres from/to requis' }, { status: 400 });
 
   const events = await eventsBetween(from, to);
-  return Response.json({ events: events.map(toDashboardEvent) });
+  // Historical age is relative to the event's own detection time, not "now" —
+  // otherwise a week-old event would show a nonsensical multi-day age.
+  return Response.json({ events: events.map(e => toDashboardEvent(e, new Date(e.lastAcquiredAt))) });
 }

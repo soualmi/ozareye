@@ -15,6 +15,11 @@ export function blowsTowardDeg(windDirectionFromDeg: number): number {
   return (windDirectionFromDeg + 180) % 360;
 }
 
+const CARDINALS_FR = ['N', 'NE', 'E', 'SE', 'S', 'SO', 'O', 'NO'];
+export function cardinalFr(deg: number) {
+  return CARDINALS_FR[Math.round(((deg % 360) + 360) % 360 / 45) % 8];
+}
+
 /**
  * Classifies a village relative to a fire's wind. `fire` and `village` are
  * {lat, lon}. `windDirectionFromDeg` is the raw meteorological reading (FROM).

@@ -1,6 +1,6 @@
 import villagesData from '@/data/villages.json';
 import { distanceKm } from './geo';
-import { classifyExposure, type WindRelation } from './wind';
+import { cardinalFr, classifyExposure, type WindRelation } from './wind';
 import { wilayaAt } from './wilaya';
 
 // Real point-in-polygon wilaya attribution for a fire centroid — used both for
@@ -150,17 +150,35 @@ function newEventFrom(det: Detection): FireEvent {
  * `events` is mutated in place and returned. One event = one fire, so
  * downstream alerting fires once per event, not once per pixel.
  */
+function isSameDetection(a: Detection, b: Detection): boolean {
+  return a.latitude === b.latitude && a.longitude === b.longitude && a.acquiredAt === b.acquiredAt && a.satellite === b.satellite;
+}
+
+// True if `det` is within CLUSTER_TIME_HOURS of at least one detection
+// already in `ev` — anchored to the nearest KNOWN detection, not to the
+// event's current (advancing) lastAcquiredAt. A fire tracked over many hours
+// must keep matching its OWN early detections when the same 24h FIRMS window
+// is reprocessed; anchoring to lastAcquiredAt alone lets those early
+// detections "fall out" of their own event's window once lastAcquiredAt has
+// moved on >12h past them, spawning a duplicate event that — because the id
+// is generated from that detection's own lat/lon/time — collides with the
+// original event's id and carries no notification history. That collision,
+// not score/status oscillation, is what caused fixed events to re-alert.
+function withinClusterWindow(ev: FireEvent, det: Detection): boolean {
+  return ev.detections.some(d => hoursBetween(d.acquiredAt, det.acquiredAt) <= CLUSTER_TIME_HOURS);
+}
+
 export function clusterDetections(detections: Detection[], events: FireEvent[]): FireEvent[] {
   for (const det of detections) {
     let best: FireEvent | null = null, bestDist = Infinity;
     for (const ev of events) {
       const dist = distanceKm(ev.latitude, ev.longitude, det.latitude, det.longitude);
-      if (dist <= CLUSTER_RADIUS_KM && hoursBetween(ev.lastAcquiredAt, det.acquiredAt) <= CLUSTER_TIME_HOURS && dist < bestDist) {
+      if (dist <= CLUSTER_RADIUS_KM && withinClusterWindow(ev, det) && dist < bestDist) {
         best = ev; bestDist = dist;
       }
     }
     if (best) {
-      const isDuplicate = best.detections.some(d => d.latitude === det.latitude && d.longitude === det.longitude && d.acquiredAt === det.acquiredAt && d.satellite === det.satellite);
+      const isDuplicate = best.detections.some(d => isSameDetection(d, det));
       if (!isDuplicate) {
         best.detections.push(det);
         best.latitude = average(best.detections.map(d => d.latitude));
@@ -172,7 +190,40 @@ export function clusterDetections(detections: Detection[], events: FireEvent[]):
       events.push(newEventFrom(det));
     }
   }
-  return events.map(scoreEvent);
+  return mergeById(events).map(scoreEvent);
+}
+
+// Defense in depth: if two fragments in this pass ever end up sharing an id
+// anyway, merge them rather than let both survive to route.ts. Union of
+// detections, earliest first-seen / latest last-seen timestamp, and —
+// critically — the notification history of whichever fragment has one. A
+// merged event must never look un-notified just because one fragment happens
+// to be the "new" one; losing that history is exactly what caused the re-spam.
+function mergeById(events: FireEvent[]): FireEvent[] {
+  const byId = new Map<string, FireEvent>();
+  for (const ev of events) {
+    const existing = byId.get(ev.id);
+    byId.set(ev.id, existing ? mergeEvents(existing, ev) : ev);
+  }
+  return [...byId.values()];
+}
+
+function mergeEvents(a: FireEvent, b: FireEvent): FireEvent {
+  const detections = [...a.detections];
+  for (const d of b.detections) if (!detections.some(x => isSameDetection(x, d))) detections.push(d);
+  const firstAcquiredAt = a.firstAcquiredAt < b.firstAcquiredAt ? a.firstAcquiredAt : b.firstAcquiredAt;
+  const lastAcquiredAt = a.lastAcquiredAt > b.lastAcquiredAt ? a.lastAcquiredAt : b.lastAcquiredAt;
+
+  let notifiedAt = a.notifiedAt, notifiedScore = a.notifiedScore, notifiedStatus = a.notifiedStatus;
+  if (!notifiedAt || (b.notifiedAt && b.notifiedAt > notifiedAt)) {
+    notifiedAt = b.notifiedAt; notifiedScore = b.notifiedScore; notifiedStatus = b.notifiedStatus;
+  }
+
+  return {
+    ...a, detections, firstAcquiredAt, lastAcquiredAt,
+    latitude: average(detections.map(d => d.latitude)), longitude: average(detections.map(d => d.longitude)),
+    notifiedAt, notifiedScore, notifiedStatus,
+  };
 }
 
 /**
@@ -208,6 +259,35 @@ function scoreEvent(event: FireEvent): FireEvent {
     ...event, maxFrp, maxConfidence, passCount, maxPixelsInSinglePass, score, evidence, evidenceShort,
     status: score >= 85 ? 'urgent' : score >= 65 ? 'corroborated' : 'observation',
   };
+}
+
+// Dashboard-only presentational helpers — reuse the exact thresholds/grouping
+// scoreEvent already computes above, described in words instead of duplicating
+// or inventing new breakpoints. Telegram output (telegramText) is untouched.
+export function confidenceLabel(c: string): string {
+  const rank = confidenceRank(c);
+  return rank === 2 ? 'élevée' : rank === 1 ? 'moyenne' : 'faible';
+}
+
+// Same FRP/size breakpoints scoreEvent uses to score the event — in words,
+// not a fabricated hectare figure this data can't support.
+export function magnitudeLabel(maxFrp: number, maxPixelsInSinglePass: number): string {
+  if (maxFrp >= 20 || maxPixelsInSinglePass >= 3) return 'signal intense, feu probablement étendu';
+  if (maxFrp >= 8) return 'signal modéré';
+  return 'signal faible, foyer localisé';
+}
+
+export type PassInfo = { satellite: string; instrument: string; acquiredAt: string };
+
+// Distinct (satellite, overpass time) pairs — the same grouping scoreEvent
+// uses for passCount, exposed here for the dashboard's technical details.
+export function distinctPasses(event: FireEvent): PassInfo[] {
+  const seen = new Map<string, PassInfo>();
+  for (const d of event.detections) {
+    const key = `${d.satellite}|${d.acquiredAt}`;
+    if (!seen.has(key)) seen.set(key, { satellite: d.satellite, instrument: d.instrument, acquiredAt: d.acquiredAt });
+  }
+  return [...seen.values()].sort((a, b) => a.acquiredAt.localeCompare(b.acquiredAt));
 }
 
 function applyWeather(event: FireEvent, humidity?: number, windKph?: number, windDirectionFromDeg?: number): FireEvent {
@@ -277,10 +357,7 @@ export function algiersTime(iso: string) {
   return new Date(iso).toLocaleString('fr-FR', { timeZone: 'Africa/Algiers', hour: '2-digit', minute: '2-digit' });
 }
 
-const CARDINALS_FR = ['N', 'NE', 'E', 'SE', 'S', 'SO', 'O', 'NO'];
-export function cardinalFr(deg: number) {
-  return CARDINALS_FR[Math.round(((deg % 360) + 360) % 360 / 45) % 8];
-}
+export { cardinalFr };
 
 // Coarse bucket instead of a decimal hour figure — SPREAD_FACTOR is a rule of
 // thumb, not a model, and a number like "~1.8h" reads as more precise than it is.
