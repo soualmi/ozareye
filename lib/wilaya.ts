@@ -67,3 +67,8 @@ export function wilayaAt(lat: number, lon: number): string | null {
   }
   return null;
 }
+
+// For the dashboard's wilaya filter dropdown.
+export function allWilayaNames(): string[] {
+  return loadWilayas().map(w => w.name).sort((a, b) => a.localeCompare(b, 'fr'));
+}

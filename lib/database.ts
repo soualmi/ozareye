@@ -81,3 +81,14 @@ export async function distinctDayCount(cell: string, sinceDay: string): Promise<
 export async function pruneHotspotHistory(beforeDay: string) {
   db().prepare('DELETE FROM hotspot_days WHERE day < ?').run(beforeDay);
 }
+
+// Dashboard read-only queries — never called from /api/monitor.
+export async function eventsSince(sinceIso: string, limit = 200): Promise<FireEvent[]> {
+  const rows = db().prepare('SELECT payload FROM fire_events WHERE last_acquired_at >= ? ORDER BY last_acquired_at DESC LIMIT ?').all(sinceIso, limit) as { payload: string }[];
+  return rows.map(r => JSON.parse(r.payload) as FireEvent);
+}
+
+export async function eventsBetween(fromIso: string, toIso: string, limit = 500): Promise<FireEvent[]> {
+  const rows = db().prepare('SELECT payload FROM fire_events WHERE last_acquired_at >= ? AND last_acquired_at <= ? ORDER BY last_acquired_at DESC LIMIT ?').all(fromIso, toIso, limit) as { payload: string }[];
+  return rows.map(r => JSON.parse(r.payload) as FireEvent);
+}

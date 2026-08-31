@@ -17,6 +17,7 @@ export type Detection = {
 
 export type VillageExposure = {
   osm_id: string; name: string; name_ar: string | null; wilaya: string;
+  lat: number; lon: number; // for the dashboard map
   distanceKm: number; relation: WindRelation; etaHours?: number;
 };
 
@@ -255,7 +256,7 @@ function computeExposedVillages(event: FireEvent): VillageExposure[] {
     if (distanceKmVal > EXPOSURE_RADIUS_KM) continue;
     const { relation } = classifyExposure(fire, { lat: v.lat, lon: v.lon }, windDirectionFromDeg);
     const etaHours = relation !== 'upwind' && event.windKph ? distanceKmVal / (event.windKph * SPREAD_FACTOR) : undefined;
-    results.push({ osm_id: v.osm_id, name: v.name, name_ar: v.name_ar, wilaya: v.wilaya, distanceKm: distanceKmVal, relation, etaHours });
+    results.push({ osm_id: v.osm_id, name: v.name, name_ar: v.name_ar, wilaya: v.wilaya, lat: v.lat, lon: v.lon, distanceKm: distanceKmVal, relation, etaHours });
   }
   const relationRank: Record<WindRelation, number> = { downwind: 0, marginal: 1, upwind: 2 };
   return results.sort((a, b) => relationRank[a.relation] - relationRank[b.relation] || a.distanceKm - b.distanceKm);
@@ -270,64 +271,87 @@ export function minutesSince(iso: string, referenceTime: Date) {
   return Math.round((referenceTime.getTime() - new Date(iso).getTime()) / 60000);
 }
 
-function algiersTime(iso: string) {
+// Exported: the dashboard renders the same Africa/Algiers times as the Telegram
+// message, via this same function — no separate reimplementation.
+export function algiersTime(iso: string) {
   return new Date(iso).toLocaleString('fr-FR', { timeZone: 'Africa/Algiers', hour: '2-digit', minute: '2-digit' });
 }
 
 const CARDINALS_FR = ['N', 'NE', 'E', 'SE', 'S', 'SO', 'O', 'NO'];
-function cardinalFr(deg: number) {
+export function cardinalFr(deg: number) {
   return CARDINALS_FR[Math.round(((deg % 360) + 360) % 360 / 45) % 8];
 }
 
 // Coarse bucket instead of a decimal hour figure — SPREAD_FACTOR is a rule of
 // thumb, not a model, and a number like "~1.8h" reads as more precise than it is.
-function etaBucket(hours: number) {
+export function etaBucket(hours: number) {
   return hours < 1 ? '<1h' : hours <= 3 ? '1-3h' : '>3h';
 }
 
-// French and Arabic run side by side (e.g. village name + AR name + a French/Arabic
-// label right after it) with only a "/" between them. Without explicit Unicode
-// directional isolates, a bidi-aware renderer (terminal, WhatsApp) can visually
-// reorder characters right at that boundary — the source text stays byte-correct,
-// but a Latin word next to the join can render scrambled. LRI/RLI...PDI force each
-// run to lay out by its own direction without leaking into its neighbour.
-const RLI = '⁧', PDI = '⁩';
-export function biText(fr: string, ar: string | null | undefined) {
-  return ar ? `${fr}/${RLI}${ar}${PDI}` : fr;
+// Villages within a viewport bbox — used by the dashboard map to avoid ever
+// shipping the full ~9,635-village index to the client. west/south/east/north
+// in degrees, same lat/lon convention as everywhere else in this file.
+export function villagesInBounds(south: number, west: number, north: number, east: number, limit = 300) {
+  const out: typeof villages = [];
+  for (const v of villages) {
+    if (v.lat < south || v.lat > north || v.lon < west || v.lon > east) continue;
+    out.push(v);
+    if (out.length >= limit) break;
+  }
+  return out;
 }
 
-// Exported so a test can assert the FR half of every label is pure Latin — a
-// regression here (an accidental swap, a wrong template slot) is a real data bug,
-// unlike the bidi rendering issue biText() fixes above.
-export const LABELS = {
-  headline: { fr: 'ANOMALIE THERMIQUE', ar: 'إشارة حرارية' },
-  proximity: { fr: 'à proximité', ar: 'على مقربة' },
-  downwind: { fr: 'sous le vent', ar: 'مع الريح' },
-  disclaimer: { fr: 'Signal satellite, vérifier terrain', ar: 'تحقق ميدانياً' },
-  noVillage: { fr: 'Pas de village <20km sous le vent', ar: 'لا قرية قريبة' },
-};
+export type VillageSelection = { village: VillageExposure; isProximity: boolean };
 
-export function telegramText(event: FireEvent, referenceTime = new Date()) {
-  const icon = event.status === 'urgent' ? '🔴' : '🟠';
+// The exact "which villages get named" logic the Telegram message uses —
+// proximity always wins (max 2), downwind/marginal fills the rest (max 2).
+// Exported so the dashboard's detail view shows precisely what the alert did,
+// not a reimplementation that could quietly drift from it.
+export function selectExposedVillages(event: FireEvent): VillageSelection[] {
   const all = event.villages ?? [];
-
-  // Two independent slot budgets — proximity can never crowd out wind reasoning,
-  // and wind reasoning can never hide a village that's right next to the fire.
   const proximity = all.filter(v => v.distanceKm <= PROXIMITY_KM).sort((a, b) => a.distanceKm - b.distanceKm).slice(0, 2);
   const proximityIds = new Set(proximity.map(v => v.osm_id));
   const downwind = all.filter(v => v.relation !== 'upwind' && !proximityIds.has(v.osm_id))
     .sort((a, b) => (a.relation === b.relation ? a.distanceKm - b.distanceKm : a.relation === 'downwind' ? -1 : 1))
     .slice(0, 2);
-  const shown = [...proximity, ...downwind];
+  return [...proximity.map(village => ({ village, isProximity: true })), ...downwind.map(village => ({ village, isProximity: false }))];
+}
+
+// Village names still legitimately mix scripts (name + name_ar, or a Kabyle
+// name — that's the real place name, untouched). A Latin name directly against
+// an Arabic one with only a "/" between them can visually reorder at that
+// boundary in a bidi-aware renderer (terminal, WhatsApp) without explicit
+// Unicode directional isolates — the source text stays byte-correct, but a
+// Latin word next to the join can render scrambled. RLI...PDI isolates the
+// Arabic run so it can't leak into its neighbour. System labels are plain
+// French now (LABELS below), so this is only needed for village names.
+const RLI = '⁧', PDI = '⁩';
+export function biText(fr: string, ar: string | null | undefined) {
+  return ar ? `${fr}/${RLI}${ar}${PDI}` : fr;
+}
+
+// French-only system labels (village names are data, not template — they keep
+// their Arabic/Kabyle names via biText() above). Exported so a test can assert
+// none of these fixed strings contain an Arabic-range codepoint.
+export const LABELS = {
+  headline: 'ANOMALIE THERMIQUE',
+  proximity: 'à proximité',
+  downwind: 'sous le vent',
+  disclaimer: 'Signal satellite, vérifier terrain',
+  noVillage: 'Pas de village <20km sous le vent',
+};
+
+export function telegramText(event: FireEvent, referenceTime = new Date()) {
+  const icon = event.status === 'urgent' ? '🔴' : '🟠';
+  const shown = selectExposedVillages(event);
 
   const villageLines = shown.length
-    ? shown.map(v => {
-      const isProximity = proximityIds.has(v.osm_id);
-      const label = isProximity ? biText(LABELS.proximity.fr, LABELS.proximity.ar) : biText(LABELS.downwind.fr, LABELS.downwind.ar);
+    ? shown.map(({ village: v, isProximity }) => {
+      const label = isProximity ? LABELS.proximity : LABELS.downwind;
       const eta = !isProximity && v.etaHours !== undefined ? ` ~${etaBucket(v.etaHours)}` : '';
       return `⚠️ ${biText(v.name, v.name_ar)} ${v.distanceKm.toFixed(1)}km ${label}${eta}`;
     }).join('\n')
-    : biText(LABELS.noVillage.fr, LABELS.noVillage.ar);
+    : LABELS.noVillage;
 
   const ageMin = minutesSince(event.lastAcquiredAt, referenceTime);
   const windBit = event.windKph !== undefined && event.windDirectionFromDeg !== undefined
@@ -335,5 +359,5 @@ export function telegramText(event: FireEvent, referenceTime = new Date()) {
   const wilaya = eventWilaya(event);
   const locationBit = wilaya ? ` · ${wilaya}` : '';
 
-  return `${icon} ${biText(LABELS.headline.fr, LABELS.headline.ar)} — À VÉRIFIER\n\n${villageLines}\n\n📍${event.latitude.toFixed(4)},${event.longitude.toFixed(4)}${locationBit} ${algiersTime(event.lastAcquiredAt)}Alger(${ageMin}min) ${event.detections[event.detections.length - 1].instrument} FRP${event.maxFrp.toFixed(1)}MW\nPreuves: ${event.evidenceShort.join('·')}${windBit}\n\n⚠️${biText(LABELS.disclaimer.fr, LABELS.disclaimer.ar)}\nNASA FIRMS·Open-Meteo`;
+  return `${icon} ${LABELS.headline} — À VÉRIFIER\n\n${villageLines}\n\n📍${event.latitude.toFixed(4)},${event.longitude.toFixed(4)}${locationBit} ${algiersTime(event.lastAcquiredAt)}Alger(${ageMin}min) ${event.detections[event.detections.length - 1].instrument} FRP${event.maxFrp.toFixed(1)}MW\nPreuves: ${event.evidenceShort.join('·')}${windBit}\n\n⚠️${LABELS.disclaimer}\nNASA FIRMS·Open-Meteo`;
 }
