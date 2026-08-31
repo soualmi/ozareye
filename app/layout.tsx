@@ -1,4 +1,4 @@
-// Algérie Feux Alerte
+// OzarEye
 // Copyright (C) 2026 H. Soualmi
 //
 // This program is free software: you can redistribute it and/or modify
@@ -29,8 +29,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: 'Algérie Feux Alerte · Veille incendie',
-  description: 'Détection multi-source et alertes vérifiables pour les feux de forêt en Algérie.',
+  title: 'OzarEye · Veille incendie',
+  description: 'Détection multi-source et alertes vérifiables pour les feux de forêt, configurable pour n\'importe quel pays (Algérie par défaut).',
 };
 
 export default function RootLayout({

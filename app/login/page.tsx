@@ -1,4 +1,4 @@
-// Algérie Feux Alerte
+// OzarEye
 // Copyright (C) 2026 H. Soualmi
 //
 // This program is free software: you can redistribute it and/or modify
@@ -41,7 +41,7 @@ export default function Login() {
   return (
     <main className="grid min-h-screen place-items-center bg-[#07120f] px-4 text-[#edf5ef]">
       <form onSubmit={submit} className="w-full max-w-sm rounded-2xl border border-white/10 bg-[#0b1d18] p-6">
-        <h1 className="mb-1 text-lg font-semibold">Algérie Feux Alerte</h1>
+        <h1 className="mb-1 text-lg font-semibold">OzarEye</h1>
         <p className="mb-5 text-sm text-[#8da79d]">Accès réservé — tableau de bord de veille</p>
         <label className="mb-1 block text-xs uppercase tracking-wide text-[#8da79d]" htmlFor="password">Mot de passe</label>
         <input

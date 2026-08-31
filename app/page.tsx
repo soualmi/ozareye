@@ -1,4 +1,4 @@
-// Algérie Feux Alerte
+// OzarEye
 // Copyright (C) 2026 H. Soualmi
 //
 // This program is free software: you can redistribute it and/or modify
@@ -69,7 +69,7 @@ export default function Home() {
               <Flame size={21} />
             </span>
             <div>
-              <p className="font-semibold tracking-tight">Algérie Feux Alerte</p>
+              <p className="font-semibold tracking-tight">OzarEye</p>
               <p className="text-xs text-[#8da79d]">
                 Veille incendie · Algérie
               </p>

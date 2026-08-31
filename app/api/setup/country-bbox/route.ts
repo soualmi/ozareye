@@ -1,4 +1,4 @@
-// Algérie Feux Alerte
+// OzarEye
 // Copyright (C) 2026 H. Soualmi
 //
 // This program is free software: you can redistribute it and/or modify
@@ -32,7 +32,7 @@ export async function GET(request: Request) {
     url.searchParams.set('country', name);
     url.searchParams.set('format', 'json');
     url.searchParams.set('limit', '1');
-    const response = await fetch(url, { headers: { 'user-agent': 'Algerie-Feux-Alerte-Setup/1.0' } });
+    const response = await fetch(url, { headers: { 'user-agent': 'OzarEye-Setup/1.0' } });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const results = await response.json() as { boundingbox?: [string, string, string, string] }[];
     const box = results[0]?.boundingbox;

@@ -1,4 +1,4 @@
-// Algérie Feux Alerte
+// OzarEye
 // Copyright (C) 2026 H. Soualmi
 //
 // This program is free software: you can redistribute it and/or modify
@@ -101,7 +101,7 @@ export default function Dashboard() {
       {/* Top bar */}
       <div className="pointer-events-none absolute inset-x-0 top-0 z-[1000] flex items-start justify-between gap-2 p-3">
         <div className="pointer-events-auto flex items-center gap-2 rounded-xl border border-white/10 bg-[#07120f]/90 px-3 py-2 text-xs backdrop-blur">
-          <span className="font-semibold">Algérie Feux Alerte</span>
+          <span className="font-semibold">OzarEye</span>
           <span className="text-[#8da79d]">{updatedAt ? `dernière mise à jour ${new Date(updatedAt).toLocaleTimeString('fr-FR', { timeZone: 'Africa/Algiers', hour: '2-digit', minute: '2-digit' })}` : '…'}</span>
         </div>
         <div className="pointer-events-auto flex items-center gap-2">

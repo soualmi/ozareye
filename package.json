@@ -1,7 +1,8 @@
 {
-  "name": "sites-project",
+  "name": "ozareye",
   "version": "0.1.0",
   "private": true,
+  "description": "OzarEye — self-hosted, multi-country wildfire thermal-anomaly alert tool (NASA FIRMS satellite detection, wind-aware village exposure, Telegram alerts).",
   "license": "AGPL-3.0",
   "engines": {
     "node": ">=22.13.0"
@@ -17,7 +18,8 @@
     "test:wilaya": "tsx --test lib/wilaya.test.ts",
     "test:clustering": "tsx --test lib/clustering.test.ts",
     "test:config": "tsx --test lib/config.test.ts",
-    "test": "tsx --test lib/wind.test.ts lib/labels.test.ts lib/wilaya.test.ts lib/clustering.test.ts lib/config.test.ts",
+    "test:fetch-timeout": "tsx --test lib/fetch-timeout.test.ts",
+    "test": "tsx --test lib/wind.test.ts lib/labels.test.ts lib/wilaya.test.ts lib/clustering.test.ts lib/config.test.ts lib/fetch-timeout.test.ts",
     "replay": "tsx scripts/replay.ts"
   },
   "dependencies": {

@@ -1,4 +1,4 @@
-// Algérie Feux Alerte
+// OzarEye
 // Copyright (C) 2026 H. Soualmi
 //
 // This program is free software: you can redistribute it and/or modify
@@ -120,11 +120,21 @@ async function runMonitor(request: Request): Promise<Response> {
     if (shouldAlert(event)) {
       const wilaya = eventWilaya(event);
       const destination = chatIdForWilaya(wilaya, chatId);
-      const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id: destination, text: telegramText(event, undefined, config.proximityKm), disable_web_page_preview: true }) });
-      if (response.ok) {
-        event.notifiedAt = new Date().toISOString(); event.notifiedScore = event.score; event.notifiedStatus = event.status; sent++;
-        const key = wilaya ?? 'inconnue';
-        alertsPerWilaya[key] = (alertsPerWilaya[key] ?? 0) + 1;
+      // Previously unguarded: a network error or hung request here would
+      // throw past this whole handler, crashing the run before any LATER
+      // event in this loop got saved. Now it fails soft like FIRMS/Open-Meteo
+      // already do — logged, event left un-notified (so it naturally retries
+      // on the next poll instead of getting silently marked as sent), loop
+      // continues.
+      try {
+        const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id: destination, text: telegramText(event, undefined, config.proximityKm), disable_web_page_preview: true }), signal: AbortSignal.timeout(10_000) });
+        if (response.ok) {
+          event.notifiedAt = new Date().toISOString(); event.notifiedScore = event.score; event.notifiedStatus = event.status; sent++;
+          const key = wilaya ?? 'inconnue';
+          alertsPerWilaya[key] = (alertsPerWilaya[key] ?? 0) + 1;
+        }
+      } catch (error) {
+        console.log(`Telegram send FAILED for event ${event.id}: ${error instanceof Error ? error.message : error}`);
       }
     }
     await saveSignal(event);

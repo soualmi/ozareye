@@ -1,4 +1,4 @@
-// Algérie Feux Alerte
+// OzarEye
 // Copyright (C) 2026 H. Soualmi
 //
 // This program is free software: you can redistribute it and/or modify
@@ -106,7 +106,11 @@ export async function fetchDetections(mapKey: string, opts?: { box?: string; dat
   return Promise.all(SOURCES.map(async (source): Promise<SourceResult> => {
     try {
       const url = `https://firms.modaps.eosdis.nasa.gov/api/area/csv/${mapKey}/${source}/${box}/1${datePart}`;
-      const response = await fetch(url, { headers: { 'User-Agent': 'Algerie-Feux-Alerte/1.0' } });
+      // A hung FIRMS request must not stall the whole run — the catch below
+      // already treats any failure from one source as independent of the
+      // other two (Promise.all across SOURCES), so a timeout here falls
+      // through the exact same "source X: FAILED" path as a network error.
+      const response = await fetch(url, { headers: { 'User-Agent': 'OzarEye/1.0' }, signal: AbortSignal.timeout(15_000) });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const rows = parseCsv(await response.text()).map(rowToDetection);
       console.log(`source ${source}: ${rows.length} rows`);
@@ -331,7 +335,12 @@ function applyWeather(event: FireEvent, humidity?: number, windKph?: number, win
 export async function enrichWeather(event: FireEvent): Promise<FireEvent> {
   const url = `https://api.open-meteo.com/v1/forecast?latitude=${event.latitude}&longitude=${event.longitude}&current=relative_humidity_2m,wind_speed_10m,wind_direction_10m&wind_speed_unit=kmh`;
   try {
-    const data = await fetch(url).then(r => r.json()) as { current?: { relative_humidity_2m?: number; wind_speed_10m?: number; wind_direction_10m?: number } };
+    // route.ts calls this once per >=55-score event, sequentially — a hung
+    // call here has no other backstop, so it gets its own bound rather than
+    // relying on the whole request's platform-level timeout. Same fail-soft
+    // shape as any other Open-Meteo error: caught below, event returned
+    // un-enriched rather than the run failing.
+    const data = await fetch(url, { signal: AbortSignal.timeout(10_000) }).then(r => r.json()) as { current?: { relative_humidity_2m?: number; wind_speed_10m?: number; wind_direction_10m?: number } };
     return applyWeather(event, data.current?.relative_humidity_2m, data.current?.wind_speed_10m, data.current?.wind_direction_10m);
   } catch { return event; }
 }
@@ -344,7 +353,7 @@ export async function enrichWeatherHistorical(event: FireEvent): Promise<FireEve
   const day = event.lastAcquiredAt.slice(0, 10);
   const url = `https://archive-api.open-meteo.com/v1/archive?latitude=${event.latitude}&longitude=${event.longitude}&start_date=${day}&end_date=${day}&hourly=relative_humidity_2m,wind_speed_10m,wind_direction_10m&wind_speed_unit=kmh&timezone=UTC`;
   try {
-    const data = await fetch(url).then(r => r.json()) as { hourly?: { time: string[]; relative_humidity_2m: number[]; wind_speed_10m: number[]; wind_direction_10m: number[] } };
+    const data = await fetch(url, { signal: AbortSignal.timeout(10_000) }).then(r => r.json()) as { hourly?: { time: string[]; relative_humidity_2m: number[]; wind_speed_10m: number[]; wind_direction_10m: number[] } };
     const hourly = data.hourly;
     if (!hourly || !hourly.time.length) return event;
     const targetHour = `${day}T${event.lastAcquiredAt.slice(11, 13)}:00`;

@@ -1,4 +1,4 @@
-// Algérie Feux Alerte
+// OzarEye
 // Copyright (C) 2026 H. Soualmi
 //
 // This program is free software: you can redistribute it and/or modify
@@ -74,7 +74,7 @@ out body;`;
     method: 'POST',
     // Overpass's Apache front-end 406s requests with no User-Agent/Accept —
     // matches the header fire-monitor.ts already sends to the FIRMS API.
-    headers: { 'content-type': 'text/plain', 'user-agent': 'Algerie-Feux-Alerte/1.0', accept: '*/*' },
+    headers: { 'content-type': 'text/plain', 'user-agent': 'OzarEye/1.0', accept: '*/*' },
     body: query,
   });
   if (!response.ok) {

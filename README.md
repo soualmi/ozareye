@@ -1,15 +1,17 @@
-# Algérie Feux Alerte
+# OzarEye
 
 ## 1. What this is
 
-A self-hosted wildfire alert system built around NASA's FIRMS satellite
-thermal-anomaly feed. It polls FIRMS on a schedule, clusters raw pixel
-detections into fire events, cross-references each event against a village
-index and live wind data to work out who's downwind, and sends a Telegram
-alert naming the exposed villages. It also ships a small password-protected
-web dashboard for browsing live and historical events on a map. This
-deployment is configured for northern Algeria; adapting it to another region
-takes real work — see [section 5](#5-adapting-to-your-region).
+OzarEye is a self-hosted wildfire alert system built around NASA's FIRMS
+satellite thermal-anomaly feed. It polls FIRMS on a schedule, clusters raw
+pixel detections into fire events, cross-references each event against a
+village index and live wind data to work out who's downwind, and sends a
+Telegram alert naming the exposed villages. It also ships a small
+password-protected web dashboard for browsing live and historical events on
+a map. It's a multi-country tool — the bounding box, village index, and
+admin boundaries are all configurable per instance (see the `/setup` screen,
+and [section 5](#5-adapting-to-your-region)) — but it ships defaulted to and
+worked out on northern Algeria, so that's what the examples below use.
 
 **What it is not, stated plainly:** it detects satellite-observed thermal
 anomalies, not confirmed fires. It is not an emergency service and has no
@@ -126,7 +128,7 @@ and the `node` path to match your install):
 
 ```ini
 [Unit]
-Description=Algerie Feux Alerte - fire monitor web/API server
+Description=OzarEye - fire monitor web/API server
 After=network.target
 
 [Service]

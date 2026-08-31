@@ -1,4 +1,4 @@
-// Algérie Feux Alerte
+// OzarEye
 // Copyright (C) 2026 H. Soualmi
 //
 // This program is free software: you can redistribute it and/or modify
@@ -38,7 +38,7 @@ export type AdminBoundariesResult =
   | { ok: true; regionCount: number }
   | { ok: false; error: string };
 
-const HEADERS = { 'user-agent': 'Algerie-Feux-Alerte-Setup/1.0', accept: 'application/json' };
+const HEADERS = { 'user-agent': 'OzarEye-Setup/1.0', accept: 'application/json' };
 
 function writeEmptyBoundaries(outputPath: string) {
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
