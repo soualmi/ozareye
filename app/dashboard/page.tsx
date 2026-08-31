@@ -17,6 +17,7 @@
 'use client';
 
 import dynamic from 'next/dynamic';
+import { Settings } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import EventDetail from '@/components/dashboard/EventDetail';
 import type { DashboardEvent } from '@/components/dashboard/types';
@@ -43,10 +44,18 @@ export default function Dashboard() {
   const [historyEvents, setHistoryEvents] = useState<DashboardEvent[]>([]);
   const [historyBusy, setHistoryBusy] = useState(false);
 
+  // A fresh, unconfigured instance (no region built yet, or missing keys)
+  // must land on /setup, not an empty dashboard — checked once per visit,
+  // right after auth, before anything dashboard-specific renders. A
+  // configured instance (this check passing) is unaffected either way.
   useEffect(() => {
     fetch('/api/dashboard/session').then(r => r.json() as Promise<{ authenticated: boolean }>).then(d => {
       if (!d.authenticated) { window.location.href = '/login'; return; }
-      setAuthChecked(true);
+      fetch('/api/setup/config').then(r => r.json() as Promise<{ config: { configured: boolean }; secretsConfigured: Record<string, boolean> }>).then(cfg => {
+        const secretsOk = Object.values(cfg.secretsConfigured).every(Boolean);
+        if (!cfg.config.configured || !secretsOk) { window.location.href = '/setup'; return; }
+        setAuthChecked(true);
+      }).catch(() => { setAuthChecked(true); }); // can't confirm config state — don't strand a working instance on a failed check
     }).catch(() => { window.location.href = '/login'; });
   }, []);
 
@@ -113,7 +122,9 @@ export default function Dashboard() {
             <option value="all">Toutes les wilayas</option>
             {wilayas.map(w => <option key={w} value={w}>{w}</option>)}
           </select>
-          <a href="/setup" className="rounded-xl border border-white/10 bg-[#07120f]/90 px-3 py-2 text-xs text-[#8da79d] backdrop-blur hover:text-[#edf5ef]">Configuration</a>
+          <a href="/setup" className="flex items-center gap-1.5 rounded-xl border border-white/10 bg-[#07120f]/90 px-3 py-2 text-xs text-[#8da79d] backdrop-blur hover:text-[#edf5ef]">
+            <Settings size={14} /> Configuration
+          </a>
         </div>
       </div>
 
