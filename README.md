@@ -65,14 +65,43 @@ as "evacuate."
   became stable, unflagged, in Node 22.13 — earlier 22.x releases won't work.
   Install via [nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or your
   distro's Node 22 package if it's new enough; check with `node --version`.
-- **A free NASA FIRMS map key.** Request one at
-  [firms.modaps.eosdis.nasa.gov/api/map_key](https://firms.modaps.eosdis.nasa.gov/api/map_key/) —
-  it's free, instant, and only requires an email address.
-- **A Telegram bot token and a destination chat/channel id.** Create a bot via
-  [@BotFather](https://t.me/BotFather) on Telegram (`/newbot`, copy the
-  token). Then create the channel or group you want alerts sent to, add the
-  bot as a member/admin, send any message in it, and read the chat id from
-  `https://api.telegram.org/bot<TOKEN>/getUpdates`.
+- **A free NASA FIRMS map key.** This is the credential the FIRMS satellite
+  feed itself requires — the app has no built-in key of its own to share.
+  1. Go to [firms.modaps.eosdis.nasa.gov/api/map_key](https://firms.modaps.eosdis.nasa.gov/api/map_key/).
+  2. Enter your email address and submit the form.
+  3. Your map key appears immediately on that same page (and is emailed to
+     you too) — no approval wait, no payment, no account needed.
+  4. Copy it — you'll paste it into `FIRMS_MAP_KEY` (via `/setup` in the app,
+     or `.env.local` — see section 4.1).
+
+- **A Telegram bot token.** This is what lets the app send messages *as*
+  your own bot, so alerts don't come from some shared/anonymous account.
+  1. Open Telegram and search for **@BotFather** (Telegram's own official
+     bot for creating other bots), then start a chat with it.
+  2. Send it the command `/newbot`.
+  3. Pick a display name for your bot — anything you like, e.g. "My Fire
+     Alerts".
+  4. Pick a username for it — must be unique and end in `bot`, e.g.
+     `my_fire_alerts_bot`.
+  5. BotFather replies with a **token**: a long string that looks like
+     `123456789:ABCdefGhIJKlmNoPQRstuVWxyz`. Copy it — you'll paste it into
+     `TELEGRAM_BOT_TOKEN`.
+
+- **A Telegram chat/channel id.** This tells the app *where* to send those
+  messages — a bot can't message a chat it doesn't know about yet.
+  1. Decide where you want alerts to land: a private chat with yourself, a
+     group, or a channel.
+  2. Add your bot to it — for a channel, add it as an **admin**; for a group
+     or a DM, adding it as a member is enough.
+  3. Send any message in that chat (even just "hello") so Telegram has
+     something to report back to you.
+  4. In a browser, visit
+     `https://api.telegram.org/bot<TOKEN>/getUpdates`, replacing `<TOKEN>`
+     with the real bot token from the previous step.
+  5. In the JSON that comes back, find `"chat":{"id":...` — that number
+     (often starting with `-100` for groups/channels) is the chat id. Copy
+     it — you'll paste it into `TELEGRAM_CHAT_ID`.
+
 - **Basic comfort with a terminal, systemd, and cron.** The install below
   assumes you can edit a systemd unit file, install a crontab line, and debug
   a service that fails to start. This is not a one-click deploy.
