@@ -1,3 +1,19 @@
+// Algérie Feux Alerte
+// Copyright (C) 2026 H. Soualmi
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 // One-time (re-)build of data/villages.json from a raw Overpass JSON dump.
 // Never queries Overpass itself — that's a manual step (see README) so the
 // live app never depends on Overpass at runtime. Refuses to overwrite the

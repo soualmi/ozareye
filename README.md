@@ -342,6 +342,6 @@ Read this before you point it at anything real:
 - Village and boundary data: **© OpenStreetMap contributors**, available
   under the [Open Database License](https://www.openstreetmap.org/copyright).
 
-**License:** TODO — no license has been chosen for this repository yet.
-Until one is added, all rights are reserved by default and this code is not
-licensed for reuse by others.
+**License:** [AGPL-3.0](LICENSE) — free to use and modify, but any distributed
+or network-hosted version of this code (including running your own instance
+that others interact with) must publish its source under the same license.
