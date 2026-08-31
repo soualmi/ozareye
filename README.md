@@ -346,6 +346,16 @@ Read this before you point it at anything real:
 - **Polar orbit, not continuous coverage.** There is no "checking constantly"
   — coverage is inherently intermittent by satellite design, not a bug in
   this codebase.
+- **It only monitors while it's actually running.** The 24/7 uptime
+  requirement in section 3 isn't a nice-to-have — it's the difference between
+  this working and not. A laptop that's asleep, closed, powered off, or an
+  instance that's been stopped for any reason, monitors nothing during that
+  entire gap, silently, with no error and no warning. There is no catch-up:
+  when it comes back, it picks up whatever FIRMS has *now*, not what
+  happened while it was off. A fire that starts and is confirmed by
+  neighbors while your machine was asleep will never produce an alert,
+  before or after the fact. If you can't keep something on 24/7, this tool
+  cannot do its one job.
 - **Thermal anomalies are not confirmed fires.** Flares, industrial heat, and
   other hot sources can trigger detections; the persistent-source guard
   filters out the most obvious repeat offenders, but it is a heuristic, not
