@@ -107,8 +107,13 @@ export default function Dashboard() {
         <DashboardMap events={tab === 'live' ? events : historyEvents} selectedId={selectedId} onSelect={selectOnly} onDetail={showDetail} />
       </div>
 
-      {/* Top bar */}
-      <div className="pointer-events-none absolute inset-x-0 top-0 z-[1000] flex items-start justify-between gap-2 p-3">
+      {/* Top bar — z-[1100], strictly above the side panel's z-[1000], so its
+          controls (wilaya filter, Configuration) are never painted over even
+          if a future layout change makes the panel's box reach this corner
+          again. flex-wrap: on a narrow viewport where both pill groups don't
+          fit on one line, the right group drops to its own line instead of
+          being squeezed or pushed off-screen — it stays fully visible either way. */}
+      <div className="pointer-events-none absolute inset-x-0 top-0 z-[1100] flex flex-wrap items-start justify-between gap-2 p-3">
         <div className="pointer-events-auto flex items-center gap-2 rounded-xl border border-white/10 bg-[#07120f]/90 px-3 py-2 text-xs backdrop-blur">
           <span className="font-semibold">OzarEye</span>
           <span className="text-[#8da79d]">{updatedAt ? `dernière mise à jour ${new Date(updatedAt).toLocaleTimeString('fr-FR', { timeZone: 'Africa/Algiers', hour: '2-digit', minute: '2-digit' })}` : '…'}</span>
@@ -128,10 +133,17 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Side panel (desktop) / bottom sheet (mobile) */}
+      {/* Side panel (desktop) / bottom sheet (mobile). Root cause of the
+          missing Configuration button: this used to be md:inset-y-0 (top:0,
+          bottom:0) — starting at the very top of the screen, it physically
+          overlapped the top bar's right-side corner (same z-index, later in
+          the DOM, so it painted over the wilaya filter and Configuration
+          link). md:top-16 reserves the top bar's own height so the panel
+          starts below it instead of underneath it — no overlap, so no
+          stacking-order fight to begin with. */}
       <div className={`absolute z-[1000] flex flex-col border-white/10 bg-[#0b1d18] shadow-2xl transition-transform
         inset-x-0 bottom-0 max-h-[55vh] rounded-t-2xl border-t
-        md:inset-y-0 md:right-0 md:left-auto md:bottom-auto md:h-full md:max-h-none md:w-[380px] md:rounded-none md:border-t-0 md:border-l
+        md:top-16 md:bottom-0 md:right-0 md:left-auto md:h-auto md:max-h-none md:w-[380px] md:rounded-none md:border-t-0 md:border-l
         ${panelOpen ? 'translate-y-0' : 'translate-y-[calc(100%-42px)] md:translate-y-0'}`}
       >
         <button onClick={() => setPanelOpen(p => !p)} className="flex items-center justify-center gap-2 border-b border-white/10 py-2.5 text-xs text-[#8da79d] md:hidden">
