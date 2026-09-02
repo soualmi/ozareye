@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-import { eventsSince, getConfig } from '@/lib/database';
+import { activeEvents, getConfig } from '@/lib/database';
 import { isAuthenticated } from '@/lib/dashboard-auth';
 import { toDashboardEvent } from '@/lib/dashboard-view';
 
@@ -23,10 +23,9 @@ import { toDashboardEvent } from '@/lib/dashboard-view';
 export async function GET(request: Request) {
   if (!isAuthenticated(request)) return Response.json({ error: 'Non autorisé' }, { status: 401 });
   const url = new URL(request.url);
-  const since = url.searchParams.get('since') ?? new Date(Date.now() - 7 * 86_400_000).toISOString();
   const wilaya = url.searchParams.get('wilaya');
 
-  const [events, config] = await Promise.all([eventsSince(since), getConfig()]);
+  const [events, config] = await Promise.all([activeEvents(24), getConfig()]);
   const mapped = events.map(e => toDashboardEvent(e, undefined, config.frpThresholdMw, config.proximityKm)).filter(e => !wilaya || wilaya === 'all' || e.wilaya === wilaya);
   return Response.json({ events: mapped, updatedAt: new Date().toISOString() });
 }
