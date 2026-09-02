@@ -20,7 +20,7 @@
 // no fabricated trajectories). Telegram's telegramText() is untouched and
 // unrelated to this.
 import {
-  LABELS, algiersTime, confidenceLabel, distinctPasses, eventWilaya, magnitudeLabel, minutesSince, selectExposedVillages,
+  LABELS, algiersTime, confidenceLabel, distinctPasses, eventWilaya, industrialContextLine, magnitudeLabel, minutesSince, selectExposedVillages,
   type FireEvent,
 } from './fire-monitor';
 
@@ -48,5 +48,8 @@ export function toDashboardEvent(event: FireEvent, referenceTime: Date = new Dat
     evidenceShort: event.evidenceShort,
     selection: selectExposedVillages(event, proximityKm),
     disclaimer: LABELS.disclaimer,
+    landUseContext: event.landUse?.context,
+    landUseSiteName: event.landUse?.siteName,
+    industrialNote: event.landUse?.context === 'industrial' ? industrialContextLine(event.landUse.siteName) : undefined,
   };
 }

@@ -129,6 +129,7 @@ function FirePopup({ event, onDetail }: { event: DashboardEvent; onDetail: (id: 
       <div>{capitalize(magnitudeShort)}</div>
       <div>Détectée il y a {formatAge(event.ageMinutes)}</div>
       <div>{proximityCount} village(s) à proximité, {downwindCount} sous le vent</div>
+      {event.industrialNote && <div style={{ marginTop: 4, color: '#f5b942' }}>🏭 {event.industrialNote}</div>}
       <button
         onClick={() => onDetail(event.id)}
         style={{ marginTop: 6, width: '100%', border: 'none', borderRadius: 6, background: '#45d892', color: '#062017', fontWeight: 600, padding: '5px 8px', cursor: 'pointer' }}

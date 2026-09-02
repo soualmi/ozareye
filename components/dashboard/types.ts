@@ -21,6 +21,8 @@ export type VillageExposure = VillageBase & { distanceKm: number; relation: 'dow
 
 export type PassInfo = { satellite: string; instrument: string; acquiredAt: string; acquiredAtAlgiers: string };
 
+export type LandUseContext = 'industrial' | 'natural' | 'unknown';
+
 export type DashboardEvent = {
   id: string;
   latitude: number; longitude: number;
@@ -36,4 +38,7 @@ export type DashboardEvent = {
   evidenceShort: string[];
   selection: { village: VillageExposure; isProximity: boolean }[];
   disclaimer: string;
+  landUseContext?: LandUseContext;
+  landUseSiteName?: string;
+  industrialNote?: string;
 };

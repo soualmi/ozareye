@@ -55,6 +55,13 @@ export default function EventDetail({ event, onBack }: { event: DashboardEvent; 
         {' '}{capitalize(event.magnitude)}.
       </p>
 
+      {/* 2b. Land-use context, when the site is a known industrial/energy feature */}
+      {event.industrialNote && (
+        <div className="mb-4 rounded-xl border border-[#f5b942]/40 bg-[#f5b942]/10 p-3 text-xs text-[#f5d98a]">
+          🏭 {event.industrialNote}
+        </div>
+      )}
+
       {/* 3. CONSTATÉ / PROBABLE */}
       <div className="mb-3 rounded-xl border border-white/10 bg-[#07130f] p-3">
         <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-[#63dda0]">Constaté</h3>

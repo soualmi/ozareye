@@ -15,9 +15,10 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import {
-  ALERT_SCORE_THRESHOLD, clusterDetections, enrichWeather, eventWilaya, fetchDetections, gridCell, telegramText,
+  ALERT_SCORE_THRESHOLD, clusterDetections, enrichWeather, eventWilaya, fetchDetections, gridCell, lowerStatus, telegramText,
   DEFAULT_PERSISTENT_SOURCE_WINDOW_DAYS, type Detection, type FireEvent,
 } from '@/lib/fire-monitor';
+import { lookupLandUse } from '@/lib/landuse';
 import { activeEvents, distinctDayCount, getConfig, initDb, isFirstRun, pruneHotspotHistory, recordDetectionDay, saveSignal } from '@/lib/database';
 import { bboxToString } from '@/scripts/build-villages';
 import { chatIdForWilaya } from '@/lib/wilaya-routing';
@@ -68,6 +69,19 @@ async function suppressPersistentSources(detections: Detection[], persistentSour
   return { kept, suppressed };
 }
 
+// Land-use context (lib/landuse.ts, an OSM/Overpass lookup): tags an event
+// when it sits on a known industrial/energy site and lowers its status one
+// rung so it never reads as a top "urgent" red alert for what is very likely
+// a permanent heat source — but never drops it, since an industrial site can
+// genuinely catch fire too. Runs for every clustered event; Overpass calls
+// are cached per ~1km cell and fail soft (context 'unknown', event
+// untouched otherwise) — see lib/landuse.ts.
+async function applyLandUse(event: FireEvent): Promise<FireEvent> {
+  const landUse = await lookupLandUse(event.latitude, event.longitude);
+  if (landUse.context !== 'industrial') return { ...event, landUse };
+  return { ...event, landUse, status: lowerStatus(event.status) };
+}
+
 // Two independent credentials, either one sufficient — never removed, only
 // added to. The VPS/systemd cron (scripts/run-monitor.sh) sends
 // `x-monitor-secret` on a POST, exactly as before. Vercel Cron Jobs always
@@ -116,7 +130,8 @@ async function runMonitor(request: Request): Promise<Response> {
   let sent = 0;
   const alertsPerWilaya: Record<string, number> = {};
   for (const raw of events) {
-    const event = raw.score >= 55 ? await enrichWeather(raw) : raw;
+    let event = raw.score >= 55 ? await enrichWeather(raw) : raw;
+    event = await applyLandUse(event);
     if (shouldAlert(event)) {
       const wilaya = eventWilaya(event);
       const destination = chatIdForWilaya(wilaya, chatId);

@@ -37,6 +37,17 @@ export type VillageExposure = {
   distanceKm: number; relation: WindRelation; etaHours?: number;
 };
 
+// Land-use context (lib/landuse.ts, an OSM/Overpass lookup) — tells the
+// engine WHAT sits under a detection, so a permanent industrial/energy heat
+// source (a steel plant, a gas flare, a quarry, a landfill) isn't presented
+// as a probable wildfire. 'unknown' covers both "lookup failed/timed out"
+// and "not yet looked up" — either way the event proceeds exactly as it did
+// before this feature existed. This complements, not replaces, the 30-day
+// persistent-source guard below: this gives context on the FIRST detection,
+// the guard catches unnamed recurring sources purely from history over time.
+export type LandUseContext = 'industrial' | 'natural' | 'unknown';
+export type LandUseInfo = { context: LandUseContext; siteName?: string };
+
 export type FireEvent = {
   id: string;
   latitude: number; longitude: number; // centroid, recomputed as pixels join
@@ -47,6 +58,7 @@ export type FireEvent = {
   evidence: string[]; evidenceShort: string[];
   windKph?: number; windDirectionFromDeg?: number; humidity?: number;
   villages?: VillageExposure[];
+  landUse?: LandUseInfo;
   notifiedAt?: string; notifiedScore?: number; notifiedStatus?: FireEvent['status'];
 };
 
@@ -454,6 +466,34 @@ export const LABELS = {
   noVillage: 'Pas de village <20km sous le vent',
 };
 
+// Lowers an event's status one rung when land-use context flags the site as
+// a known industrial/energy feature (app/api/monitor/route.ts calls this) —
+// the event is still recorded and can still alert, it just never reads as a
+// top "urgent" red marker for what is very likely a permanent heat source,
+// not a wildfire.
+export function lowerStatus(status: FireEvent['status']): FireEvent['status'] {
+  return status === 'urgent' ? 'corroborated' : 'observation';
+}
+
+// OSM/Overpass site names come back in whatever script the mapper used —
+// often Arabic-only for an industrial zone. Same bidi hazard biText() guards
+// against for village names: a Latin sentence directly against an Arabic run
+// with no explicit isolate can visually reorder at the join in a bidi-aware
+// renderer (Telegram, WhatsApp), even though the source text stays correct.
+const ARABIC_RANGE = /[؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿]/;
+function isolateIfArabic(name: string) {
+  return ARABIC_RANGE.test(name) ? `${RLI}${name}${PDI}` : name;
+}
+
+// The one line, in French, that both telegramText() and the dashboard
+// (lib/dashboard-view.ts) show verbatim when land-use context flags a known
+// industrial/energy site. Kept out of LABELS because it takes the site's OSM
+// name as a parameter.
+export function industrialContextLine(siteName?: string): string {
+  const site = siteName ? ` (${isolateIfArabic(siteName)})` : '';
+  return `Détection sur zone industrielle connue${site} — probablement une source de chaleur permanente, pas un feu. À vérifier.`;
+}
+
 export function telegramText(event: FireEvent, referenceTime = new Date(), proximityKm = DEFAULT_PROXIMITY_KM) {
   const icon = event.status === 'urgent' ? '🔴' : '🟠';
   const shown = selectExposedVillages(event, proximityKm);
@@ -471,6 +511,7 @@ export function telegramText(event: FireEvent, referenceTime = new Date(), proxi
     ? ` vent ${event.windKph} km/h → ${cardinalFr(event.windDirectionFromDeg + 180)}` : '';
   const wilaya = eventWilaya(event);
   const locationBit = wilaya ? ` · ${wilaya}` : '';
+  const industrialBit = event.landUse?.context === 'industrial' ? `🏭 ${industrialContextLine(event.landUse.siteName)}\n\n` : '';
 
-  return `${icon} ${LABELS.headline} — À VÉRIFIER\n\n${villageLines}\n\n📍${event.latitude.toFixed(4)},${event.longitude.toFixed(4)}${locationBit} ${algiersTime(event.lastAcquiredAt)}Alger(${ageMin}min) ${event.detections[event.detections.length - 1].instrument} FRP${event.maxFrp.toFixed(1)}MW\nPreuves: ${event.evidenceShort.join('·')}${windBit}\n\n⚠️${LABELS.disclaimer}\nNASA FIRMS·Open-Meteo`;
+  return `${icon} ${LABELS.headline} — À VÉRIFIER\n\n${villageLines}\n\n📍${event.latitude.toFixed(4)},${event.longitude.toFixed(4)}${locationBit} ${algiersTime(event.lastAcquiredAt)}Alger(${ageMin}min) ${event.detections[event.detections.length - 1].instrument} FRP${event.maxFrp.toFixed(1)}MW\nPreuves: ${event.evidenceShort.join('·')}${windBit}\n\n${industrialBit}⚠️${LABELS.disclaimer}\nNASA FIRMS·Open-Meteo`;
 }
