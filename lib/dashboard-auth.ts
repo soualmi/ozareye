@@ -74,9 +74,9 @@ export function isAuthenticated(request: Request): boolean {
 }
 
 export function sessionCookieHeader(): string {
-  return `${SESSION_COOKIE_NAME}=${createSessionCookieValue()}; HttpOnly; Path=/; Max-Age=${SESSION_TTL_MS / 1000}; SameSite=Lax`;
+  return `${SESSION_COOKIE_NAME}=${createSessionCookieValue()}; HttpOnly; Secure; Path=/; Max-Age=${SESSION_TTL_MS / 1000}; SameSite=Lax`;
 }
 
 export function clearSessionCookieHeader(): string {
-  return `${SESSION_COOKIE_NAME}=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax`;
+  return `${SESSION_COOKIE_NAME}=; HttpOnly; Secure; Path=/; Max-Age=0; SameSite=Lax`;
 }
