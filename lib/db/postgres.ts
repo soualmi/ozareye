@@ -40,7 +40,7 @@
 //     TIMESTAMP/timezone conversion surface to diverge on.
 import { neon } from '@neondatabase/serverless';
 import type { FireEvent } from '../fire-monitor';
-import type { Backend, ConfigPatch, EngineConfig, VillageBuildStatus } from './types';
+import type { Backend, ConfigPatch, EngineConfig, SourceHealthRow, VillageBuildStatus } from './types';
 import { algeriaSeedConfig } from './types';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -69,6 +69,19 @@ function readShippedVillageCount(): number {
   } catch { return 0; }
 }
 
+type SourceHealthDbRow = {
+  source: string; consecutive_failures: number; last_success_at: string | null; last_failure_at: string | null;
+  last_error: string | null; incident_open_since: string | null; last_notified_at: string | null;
+};
+
+function dbRowToSourceHealth(row: SourceHealthDbRow): SourceHealthRow {
+  return {
+    source: row.source, consecutiveFailures: row.consecutive_failures,
+    lastSuccessAt: row.last_success_at, lastFailureAt: row.last_failure_at, lastError: row.last_error,
+    incidentOpenSince: row.incident_open_since, lastNotifiedAt: row.last_notified_at,
+  };
+}
+
 export function createPostgresBackend(connectionString: string): Backend {
   const sql = neon(connectionString);
 
@@ -94,6 +107,15 @@ export function createPostgresBackend(connectionString: string): Backend {
         configured BOOLEAN NOT NULL,
         village_build_status TEXT NOT NULL,
         updated_at TEXT NOT NULL
+      )`;
+      await sql`CREATE TABLE IF NOT EXISTS source_health (
+        source TEXT PRIMARY KEY,
+        consecutive_failures INTEGER NOT NULL,
+        last_success_at TEXT,
+        last_failure_at TEXT,
+        last_error TEXT,
+        incident_open_since TEXT,
+        last_notified_at TEXT
       )`;
     },
 
@@ -194,6 +216,18 @@ export function createPostgresBackend(connectionString: string): Backend {
         configured = ${next.configured}, village_build_status = ${JSON.stringify(next.villageBuildStatus)}, updated_at = ${new Date().toISOString()}
         WHERE id = 1`;
       return next;
+    },
+
+    async getSourceHealth(source: string) {
+      const rows = await sql`SELECT * FROM source_health WHERE source = ${source}` as SourceHealthDbRow[];
+      return rows[0] ? dbRowToSourceHealth(rows[0]) : undefined;
+    },
+
+    async upsertSourceHealth(row: SourceHealthRow) {
+      await sql`INSERT INTO source_health (source, consecutive_failures, last_success_at, last_failure_at, last_error, incident_open_since, last_notified_at)
+        VALUES (${row.source}, ${row.consecutiveFailures}, ${row.lastSuccessAt}, ${row.lastFailureAt}, ${row.lastError}, ${row.incidentOpenSince}, ${row.lastNotifiedAt})
+        ON CONFLICT (source) DO UPDATE SET consecutive_failures = EXCLUDED.consecutive_failures, last_success_at = EXCLUDED.last_success_at,
+          last_failure_at = EXCLUDED.last_failure_at, last_error = EXCLUDED.last_error, incident_open_since = EXCLUDED.incident_open_since, last_notified_at = EXCLUDED.last_notified_at`;
     },
   };
 }

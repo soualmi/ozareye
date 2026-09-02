@@ -46,6 +46,26 @@ export type ConfigPatch = Partial<Omit<EngineConfig, 'bbox' | 'villageBuildStatu
   villageBuildStatus?: VillageBuildStatus;
 };
 
+// One row per named data source (the three FIRMS VIIRS feeds today; nothing
+// stops a caller from passing 'open-meteo' or 'overpass-landuse' as `source`
+// tomorrow — the table and the watchdog logic in lib/source-health.ts are
+// keyed on this string, not on a fixed enum). incidentOpenSince/lastNotifiedAt
+// are both null whenever no incident is open — see lib/source-health.ts for
+// the state machine that reads and writes this shape.
+export type SourceHealthRow = {
+  source: string;
+  consecutiveFailures: number;
+  lastSuccessAt: string | null;
+  lastFailureAt: string | null;
+  lastError: string | null;
+  incidentOpenSince: string | null;
+  lastNotifiedAt: string | null;
+};
+
+export function defaultSourceHealth(source: string): SourceHealthRow {
+  return { source, consecutiveFailures: 0, lastSuccessAt: null, lastFailureAt: null, lastError: null, incidentOpenSince: null, lastNotifiedAt: null };
+}
+
 export interface Backend {
   initDb(): Promise<void>;
   saveSignal(event: FireEvent): Promise<void>;
@@ -62,6 +82,8 @@ export interface Backend {
   eventsBetween(fromIso: string, toIso: string, limit?: number): Promise<FireEvent[]>;
   getConfig(): Promise<EngineConfig>;
   updateConfig(patch: ConfigPatch): Promise<EngineConfig>;
+  getSourceHealth(source: string): Promise<SourceHealthRow | undefined>;
+  upsertSourceHealth(row: SourceHealthRow): Promise<void>;
 }
 
 // The values this instance already shipped and ran with before /setup or

@@ -26,7 +26,7 @@ import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { FireEvent } from '../fire-monitor';
-import type { Backend, ConfigPatch, EngineConfig, VillageBuildStatus } from './types';
+import type { Backend, ConfigPatch, EngineConfig, SourceHealthRow, VillageBuildStatus } from './types';
 import { algeriaSeedConfig } from './types';
 
 // Overridable so tests can point at a throwaway file instead of the real,
@@ -50,6 +50,18 @@ const CREATE_INDEX = `CREATE INDEX IF NOT EXISTS idx_fire_events_last ON fire_ev
 // persistent sources (flares, industrial heat) that fire on far more days than
 // a real wildfire ever would. See PERSISTENT_SOURCE_DAY_THRESHOLD.
 const CREATE_HOTSPOT_TABLE = `CREATE TABLE IF NOT EXISTS hotspot_days (cell TEXT NOT NULL, day TEXT NOT NULL, PRIMARY KEY (cell, day))`;
+
+// Per-source health for the watchdog (lib/source-health.ts) — one row per
+// source name, created on its first recorded outcome (no seed rows).
+const CREATE_SOURCE_HEALTH_TABLE = `CREATE TABLE IF NOT EXISTS source_health (
+  source TEXT PRIMARY KEY,
+  consecutive_failures INTEGER NOT NULL,
+  last_success_at TEXT,
+  last_failure_at TEXT,
+  last_error TEXT,
+  incident_open_since TEXT,
+  last_notified_at TEXT
+)`;
 
 // Single-row table (id is always 1) holding the one region/tunables record
 // this instance runs with — set up via /setup, read by app/api/monitor/route.ts
@@ -107,10 +119,23 @@ function insertConfig(config: EngineConfig) {
     });
 }
 
+type SourceHealthDbRow = {
+  source: string; consecutive_failures: number; last_success_at: string | null; last_failure_at: string | null;
+  last_error: string | null; incident_open_since: string | null; last_notified_at: string | null;
+};
+
+function dbRowToSourceHealth(row: SourceHealthDbRow): SourceHealthRow {
+  return {
+    source: row.source, consecutiveFailures: row.consecutive_failures,
+    lastSuccessAt: row.last_success_at, lastFailureAt: row.last_failure_at, lastError: row.last_error,
+    incidentOpenSince: row.incident_open_since, lastNotifiedAt: row.last_notified_at,
+  };
+}
+
 export function createSqliteBackend(): Backend {
   return {
     async initDb() {
-      db().exec(CREATE_TABLE); db().exec(CREATE_INDEX); db().exec(CREATE_HOTSPOT_TABLE); db().exec(CREATE_CONFIG_TABLE);
+      db().exec(CREATE_TABLE); db().exec(CREATE_INDEX); db().exec(CREATE_HOTSPOT_TABLE); db().exec(CREATE_CONFIG_TABLE); db().exec(CREATE_SOURCE_HEALTH_TABLE);
     },
 
     // The upsert the whole de-dup fix depends on: SQLite's ON CONFLICT(id) DO
@@ -212,6 +237,22 @@ export function createSqliteBackend(): Backend {
           updatedAt: new Date().toISOString(),
         });
       return next;
+    },
+
+    async getSourceHealth(source: string) {
+      const row = db().prepare('SELECT * FROM source_health WHERE source = ?').get(source) as SourceHealthDbRow | undefined;
+      return row ? dbRowToSourceHealth(row) : undefined;
+    },
+
+    async upsertSourceHealth(row: SourceHealthRow) {
+      db().prepare(`INSERT INTO source_health (source, consecutive_failures, last_success_at, last_failure_at, last_error, incident_open_since, last_notified_at)
+        VALUES (@source, @consecutiveFailures, @lastSuccessAt, @lastFailureAt, @lastError, @incidentOpenSince, @lastNotifiedAt)
+        ON CONFLICT(source) DO UPDATE SET consecutive_failures=excluded.consecutive_failures, last_success_at=excluded.last_success_at,
+          last_failure_at=excluded.last_failure_at, last_error=excluded.last_error, incident_open_since=excluded.incident_open_since, last_notified_at=excluded.last_notified_at`)
+        .run({
+          source: row.source, consecutiveFailures: row.consecutiveFailures, lastSuccessAt: row.lastSuccessAt,
+          lastFailureAt: row.lastFailureAt, lastError: row.lastError, incidentOpenSince: row.incidentOpenSince, lastNotifiedAt: row.lastNotifiedAt,
+        });
     },
   };
 }

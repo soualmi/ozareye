@@ -29,9 +29,9 @@
 // The chosen backend module is dynamically imported so the *other* one's
 // dependency (node:sqlite vs @neondatabase/serverless) is never even loaded.
 import type { FireEvent } from './fire-monitor';
-import type { Backend, ConfigPatch } from './db/types';
+import type { Backend, ConfigPatch, SourceHealthRow } from './db/types';
 
-export type { EngineConfig, VillageBuildStatus } from './db/types';
+export type { EngineConfig, VillageBuildStatus, SourceHealthRow } from './db/types';
 
 let backendPromise: Promise<Backend> | null = null;
 
@@ -62,3 +62,5 @@ export async function eventsSince(sinceIso: string, limit?: number) { return (aw
 export async function eventsBetween(fromIso: string, toIso: string, limit?: number) { return (await backend()).eventsBetween(fromIso, toIso, limit); }
 export async function getConfig() { return (await backend()).getConfig(); }
 export async function updateConfig(patch: ConfigPatch) { return (await backend()).updateConfig(patch); }
+export async function getSourceHealth(source: string) { return (await backend()).getSourceHealth(source); }
+export async function upsertSourceHealth(row: SourceHealthRow) { return (await backend()).upsertSourceHealth(row); }

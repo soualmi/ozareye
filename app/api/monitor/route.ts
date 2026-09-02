@@ -16,13 +16,14 @@
 
 import {
   ALERT_SCORE_THRESHOLD, clusterDetections, enrichWeather, eventWilaya, fetchDetections, gridCell, lowerStatus, telegramText,
-  DEFAULT_PERSISTENT_SOURCE_WINDOW_DAYS, type Detection, type FireEvent,
+  DEFAULT_PERSISTENT_SOURCE_WINDOW_DAYS, FIRMS_SOURCES, type Detection, type FireEvent,
 } from '@/lib/fire-monitor';
 import { lookupLandUse } from '@/lib/landuse';
-import { activeEvents, distinctDayCount, getConfig, initDb, isFirstRun, pruneHotspotHistory, recordDetectionDay, saveSignal } from '@/lib/database';
+import { activeEvents, distinctDayCount, getConfig, initDb, isFirstRun, pruneHotspotHistory, recordDetectionDay, saveSignal, type EngineConfig } from '@/lib/database';
 import { bboxToString } from '@/scripts/build-villages';
 import { chatIdForWilaya } from '@/lib/wilaya-routing';
 import { appendRunLog } from '@/lib/run-log';
+import { recordSourceOutcome } from '@/lib/source-health';
 
 const ESCALATION_SCORE_DELTA = 15;
 const STATUS_RANK: Record<FireEvent['status'], number> = { observation: 0, corroborated: 1, urgent: 2 };
@@ -103,14 +104,29 @@ async function runMonitor(request: Request): Promise<Response> {
   if (!isAuthorized(request)) return Response.json({ error: 'Non autorisé' }, { status: 401 });
   const mapKey = process.env.FIRMS_MAP_KEY, botToken = process.env.TELEGRAM_BOT_TOKEN, chatId = process.env.TELEGRAM_CHAT_ID;
   if (!mapKey || !botToken || !chatId) return Response.json({ error: 'Variables FIRMS/Telegram manquantes' }, { status: 503 });
-  await initDb();
-  // Region + tunables come from the /setup config record, not hardcoded
-  // constants — see lib/database.ts getConfig()/updateConfig(). A fresh
-  // instance gets the migrated Algeria defaults here until /setup changes them.
-  const config = await getConfig();
 
-  const firstRun = await isFirstRun();
+  // Everything from here through fetchDetections must succeed before any
+  // source actually gets polled. An exception in this stretch (DB down,
+  // corrupt config row, ...) is exactly the kind of silent-failure risk the
+  // watchdog exists for — see lib/source-health.ts — so it counts as a
+  // failure for every FIRMS source, same as an "Invalid MAP_KEY" would.
+  let config: EngineConfig, firstRun: boolean;
+  try {
+    await initDb();
+    // Region + tunables come from the /setup config record, not hardcoded
+    // constants — see lib/database.ts getConfig()/updateConfig(). A fresh
+    // instance gets the migrated Algeria defaults here until /setup changes them.
+    config = await getConfig();
+    firstRun = await isFirstRun();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.log(`monitor run CRASHED before sources were polled: ${message}`);
+    await Promise.all(FIRMS_SOURCES.map(source => recordSourceOutcome(source, { success: false, error: `run crashed: ${message}`.slice(0, 200) })));
+    return Response.json({ error: 'Erreur interne' }, { status: 500 });
+  }
+
   const sourceResults = await fetchDetections(mapKey, { box: bboxToString(config.bbox) });
+  await Promise.all(sourceResults.map(r => recordSourceOutcome(r.source, r.rows === null ? { success: false, error: r.error ?? 'erreur inconnue' } : { success: true })));
   const rawDetections = sourceResults.flatMap(r => r.rows ?? []);
   const { kept: detections, suppressed } = await suppressPersistentSources(rawDetections, config.persistentSourceDays);
   const events = clusterDetections(detections, await activeEvents(), config.frpThresholdMw);

@@ -64,7 +64,10 @@ export type FireEvent = {
 
 const villages = villagesData as { osm_id: string; name: string; name_ar: string | null; lat: number; lon: number; place: string; wilaya: string }[];
 
-const SOURCES = ['VIIRS_NOAA20_NRT', 'VIIRS_NOAA21_NRT', 'VIIRS_SNPP_NRT'];
+// Exported so app/api/monitor/route.ts can mark all three as failed if the
+// run crashes before they're even polled (lib/source-health.ts watchdog) —
+// same list, not a separate one to keep in sync.
+export const FIRMS_SOURCES = ['VIIRS_NOAA20_NRT', 'VIIRS_NOAA21_NRT', 'VIIRS_SNPP_NRT'];
 // Fallback bbox (west,south,east,north) and tunable defaults — used only when
 // a caller doesn't pass its own value (tests, the replay script, and as the
 // seed values `lib/database.ts` migrates into the config table on first run).
@@ -107,7 +110,7 @@ export const ALERT_SCORE_THRESHOLD = 70;
 // status boundary (e.g. corroborated -> urgent) — not on every extra pixel.
 const ESCALATION_SCORE_DELTA = 15;
 
-type SourceResult = { source: string; rows: Detection[] | null };
+type SourceResult = { source: string; rows: Detection[] | null; error?: string };
 
 // `box` and `date` let the replay script (Part D2) pull a historical day over a
 // narrower bbox; live monitoring passes its own configured bbox explicitly —
@@ -115,7 +118,7 @@ type SourceResult = { source: string; rows: Detection[] | null };
 export async function fetchDetections(mapKey: string, opts?: { box?: string; date?: string }): Promise<SourceResult[]> {
   const box = opts?.box ?? DEFAULT_BOX;
   const datePart = opts?.date ? `/${opts.date}` : '';
-  return Promise.all(SOURCES.map(async (source): Promise<SourceResult> => {
+  return Promise.all(FIRMS_SOURCES.map(async (source): Promise<SourceResult> => {
     try {
       const url = `https://firms.modaps.eosdis.nasa.gov/api/area/csv/${mapKey}/${source}/${box}/1${datePart}`;
       // A hung FIRMS request must not stall the whole run — the catch below
@@ -128,8 +131,9 @@ export async function fetchDetections(mapKey: string, opts?: { box?: string; dat
       console.log(`source ${source}: ${rows.length} rows`);
       return { source, rows };
     } catch (error) {
-      console.log(`source ${source}: FAILED (${error instanceof Error ? error.message : error})`);
-      return { source, rows: null };
+      const message = error instanceof Error ? error.message : String(error);
+      console.log(`source ${source}: FAILED (${message})`);
+      return { source, rows: null, error: message };
     }
   }));
 }
