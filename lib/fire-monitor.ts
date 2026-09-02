@@ -123,7 +123,7 @@ export async function fetchDetections(mapKey: string, opts?: { box?: string; dat
       // other two (Promise.all across SOURCES), so a timeout here falls
       // through the exact same "source X: FAILED" path as a network error.
       const response = await fetch(url, { headers: { 'User-Agent': 'OzarEye/1.0' }, signal: AbortSignal.timeout(15_000) });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}: ${(await response.text()).trim().slice(0, 200)}`);
       const rows = parseCsv(await response.text()).map(rowToDetection);
       console.log(`source ${source}: ${rows.length} rows`);
       return { source, rows };
