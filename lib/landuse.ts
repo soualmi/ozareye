@@ -54,16 +54,25 @@ const RADIUS_M = 1000;
 // Local index lookup (the default path)
 // ---------------------------------------------------------------------------
 
+export type Bounds = { minlat: number; minlon: number; maxlat: number; maxlon: number };
+
 export type IndustrialSite = {
   osm_id: string;
   type: 'node' | 'way' | 'relation';
   tag: string; // e.g. "landuse=industrial" — which of the 7 tags matched
   name: string | null; // displayName() already applied at build time — never Tifinagh
-  lat: number;
+  lat: number; // centre — the midpoint of `bounds` when present (verified
+  // numerically against Overpass's own `out center`: they're identical), or
+  // the node's own coordinate.
   lon: number;
-  /** Half the bbox diagonal Overpass returned for a way/relation, in metres.
-   *  null for nodes (a point has no footprint) and for the rare way/relation
-   *  Overpass returned no bounds for. */
+  /** Real footprint for a way/relation (Overpass `out bb`) — null for nodes,
+   *  a point has no footprint. A detection landing anywhere inside this
+   *  rectangle is a hit, however far from `lat`/`lon` the rectangle is wide. */
+  bounds: Bounds | null;
+  /** Half the bounds diagonal, in metres — null for nodes. Used as the extra
+   *  reach beyond RADIUS_M around the centre; also always ≥ the true max
+   *  distance from centre to any point inside bounds, since a half-diagonal
+   *  is exactly that for an axis-aligned rectangle. */
   radius_m: number | null;
 };
 
@@ -74,31 +83,100 @@ function indexPath(): string {
   return process.env.ALGERIE_FEUX_INDUSTRIAL_INDEX_PATH || path.join(process.cwd(), 'data', 'industrial-sites.json');
 }
 
-// undefined = not loaded yet; null = load failed (missing/unreadable) and
-// Overpass is the fallback for the rest of the process lifetime.
-let indexCache: IndustrialSite[] | null | undefined;
+// Grid bucket: ~0.1° cells (~11km), keyed by every cell a site's footprint
+// (bounds, or just its point for a node) plus RADIUS_M + its own radius_m
+// overlaps — so a big site (a petrochemical zone spanning several km) is
+// found from ANY cell it covers, not only the one its centre falls in. Using
+// deliberately conservative (smaller-than-true) metres-per-degree constants
+// means the computed degree buffer always OVER-estimates the real distance,
+// so a cell is never missed — only, at worst, checked for a candidate that
+// then fails the precise distance/bounds test in lookupLocal() below.
+const CELL_DEG = 0.1;
+// Real values for this bbox's latitude range (34-37.3°N) are ~110,574-110,649
+// m/deg latitude (effectively constant) and ~88,500-92,300 m/deg longitude
+// (shrinks going north) — both constants below are picked below the true
+// minimum so the degree buffer they produce is always an over-estimate.
+const LAT_M_PER_DEG = 110_000;
+const LON_M_PER_DEG = 85_000;
 
-function loadIndex(): IndustrialSite[] | null {
-  if (indexCache !== undefined) return indexCache;
-  try {
-    indexCache = JSON.parse(fs.readFileSync(indexPath(), 'utf8')) as IndustrialSite[];
-  } catch {
-    indexCache = null;
-  }
-  return indexCache;
+function cellIndex(deg: number): number {
+  return Math.floor(deg / CELL_DEG);
+}
+function cellKey(latIdx: number, lonIdx: number): string {
+  return `${latIdx},${lonIdx}`;
 }
 
-// Linear scan: data/industrial-sites.json holds a few thousand points for
-// Algeria's full bbox, so even an unindexed pass over all of them is well
-// under a millisecond — nowhere near the ≪10ms budget for a per-detection
-// lookup. Revisit with a lat/lon grid bucket only if a future region's index
-// grows into the tens of thousands.
-function lookupLocal(sites: IndustrialSite[], lat: number, lon: number): LandUseInfo {
-  let best: { site: IndustrialSite; distanceM: number } | null = null;
+function siteFootprint(site: IndustrialSite): Bounds {
+  const extraM = RADIUS_M + (site.radius_m ?? 0);
+  const extraLat = extraM / LAT_M_PER_DEG;
+  const extraLon = extraM / LON_M_PER_DEG;
+  if (site.bounds) {
+    return { minlat: site.bounds.minlat - extraLat, maxlat: site.bounds.maxlat + extraLat, minlon: site.bounds.minlon - extraLon, maxlon: site.bounds.maxlon + extraLon };
+  }
+  return { minlat: site.lat - extraLat, maxlat: site.lat + extraLat, minlon: site.lon - extraLon, maxlon: site.lon + extraLon };
+}
+
+type Buckets = Map<string, IndustrialSite[]>;
+
+function buildBuckets(sites: IndustrialSite[]): Buckets {
+  const buckets: Buckets = new Map();
   for (const site of sites) {
+    const fp = siteFootprint(site);
+    const latFrom = cellIndex(fp.minlat), latTo = cellIndex(fp.maxlat);
+    const lonFrom = cellIndex(fp.minlon), lonTo = cellIndex(fp.maxlon);
+    for (let i = latFrom; i <= latTo; i++) {
+      for (let j = lonFrom; j <= lonTo; j++) {
+        const key = cellKey(i, j);
+        const bucket = buckets.get(key);
+        if (bucket) bucket.push(site); else buckets.set(key, [site]);
+      }
+    }
+  }
+  return buckets;
+}
+
+function pointInBounds(lat: number, lon: number, b: Bounds): boolean {
+  return lat >= b.minlat && lat <= b.maxlat && lon >= b.minlon && lon <= b.maxlon;
+}
+
+// undefined = not loaded yet; null = load failed (missing/unreadable) and
+// Overpass is the fallback for the rest of the process lifetime.
+let bucketsCache: Buckets | null | undefined;
+
+function loadIndex(): Buckets | null {
+  if (bucketsCache !== undefined) return bucketsCache;
+  try {
+    const sites = JSON.parse(fs.readFileSync(indexPath(), 'utf8')) as IndustrialSite[];
+    bucketsCache = buildBuckets(sites);
+  } catch {
+    bucketsCache = null;
+  }
+  return bucketsCache;
+}
+
+// A hit is either INSIDE a site's real footprint (bounds), however far that
+// is from its centre point, OR within RADIUS_M of the centre plus the site's
+// own radius_m — the second clause is what covers a node (no bounds at all)
+// and is a superset of "inside bounds" for any site with a computed
+// radius_m, but both are checked explicitly rather than relying on that
+// implication holding for every future edge case.
+function lookupLocal(buckets: Buckets, lat: number, lon: number): LandUseInfo {
+  const bucket = buckets.get(cellKey(cellIndex(lat), cellIndex(lon)));
+  if (!bucket) return { context: 'natural' };
+
+  let best: { site: IndustrialSite; inside: boolean; distanceM: number } | null = null;
+  const seen = new Set<string>();
+  for (const site of bucket) {
+    if (seen.has(site.osm_id)) continue; // a site can appear in >1 cell
+    seen.add(site.osm_id);
+    const inside = site.bounds ? pointInBounds(lat, lon, site.bounds) : false;
     const distanceM = distanceKm(lat, lon, site.lat, site.lon) * 1000;
-    if (distanceM > RADIUS_M + (site.radius_m ?? 0)) continue;
-    if (!best || distanceM < best.distanceM) best = { site, distanceM };
+    const withinReach = distanceM <= RADIUS_M + (site.radius_m ?? 0);
+    if (!inside && !withinReach) continue;
+    // Prefer an "inside bounds" hit over a merely-nearby one; among ties, the closest centre.
+    if (!best || (inside && !best.inside) || (inside === best.inside && distanceM < best.distanceM)) {
+      best = { site, inside, distanceM };
+    }
   }
   if (!best) return { context: 'natural' };
   return { context: 'industrial', siteName: best.site.name ?? undefined };
@@ -239,8 +317,8 @@ async function lookupLandUseOverpass(lat: number, lon: number): Promise<LandUseI
 // ---------------------------------------------------------------------------
 
 export async function lookupLandUse(lat: number, lon: number): Promise<LandUseInfo> {
-  const sites = loadIndex();
-  if (sites) return lookupLocal(sites, lat, lon);
+  const buckets = loadIndex();
+  if (buckets) return lookupLocal(buckets, lat, lon);
   return lookupLandUseOverpass(lat, lon);
 }
 
@@ -251,5 +329,5 @@ export function _clearCacheForTests() {
   cache.clear();
   consecutiveFailures = 0;
   breakerOpenedAt = 0;
-  indexCache = undefined;
+  bucketsCache = undefined;
 }

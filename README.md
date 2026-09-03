@@ -309,8 +309,11 @@ the effort before starting:
      in your area to sanity-check the new index before trusting it live.
 
 4. **The industrial-site index.** `data/industrial-sites.json` is a flat
-   array of `{osm_id, type, tag, name, lat, lon, radius_m}`, built **once,
-   offline**, the same way as the village index — `lib/landuse.ts` (which
+   array of `{osm_id, type, tag, name, lat, lon, bounds, radius_m}` — `bounds`
+   is a way/relation's real footprint (`{minlat,minlon,maxlat,maxlon}`, null
+   for a node) and `radius_m` its half-diagonal; a detection inside `bounds`
+   counts as a hit however far that is from `lat`/`lon`, not just within 1km
+   of the centre. Built **once, offline**, the same way as the village index — `lib/landuse.ts` (which
    tags a detection sitting on a known industrial/energy site: a steel plant,
    a gas flare, a quarry, a landfill, ...) never queries Overpass at request
    time as long as this file exists. To rebuild it (or regenerate it for a

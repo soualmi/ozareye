@@ -231,10 +231,31 @@ test('lookupLandUse: a success resets the failure count', async () => {
 });
 
 // --- local index (the default path) -----------------------------------------
-// These four hit the REAL shipped data/industrial-sites.json — no fetch mock,
-// no network. They're the actual requirement this rewrite exists for: a
-// local, offline lookup that resolves the incidents that motivated it
-// (Bellara, the El Hamma plant) without depending on Overpass being up.
+// These hit the REAL shipped data/industrial-sites.json — no fetch mock, no
+// network. They're the actual requirement this rewrite exists for: a local,
+// offline lookup that resolves the incidents that motivated it (Bellara, the
+// El Hamma plant, and now Skikda/Sonatrach) without depending on Overpass.
+
+test('lookupLandUse: local index — Skikda/Sonatrach detection is industrial via real bounds, not just centre distance', async () => {
+  useRealLocalIndex();
+  // This exact point is 2,043m from the Sonatrach zone's CENTRE — outside the
+  // old flat-1000m-of-centroid rule — but genuinely INSIDE its real bounds
+  // (way/228946619: lat 36.848-36.886, lon 6.931-6.988). The bounds-aware
+  // match is the whole point of this rewrite; a regression back to
+  // centre-only matching would silently turn this back into 'natural'.
+  const info = await lookupLandUse(36.8683, 6.9824);
+  assert.equal(info.context, 'industrial');
+  assert.equal(info.siteName, 'Zone Industrielle Pétrochimique Sonatrach');
+});
+
+test('lookupLandUse: a point ~3km beyond Sonatrach\'s real bounds (and beyond centre+radius_m) is natural', async () => {
+  useRealLocalIndex();
+  // 3km due east of the bounds' east edge (5.5km from the site's centre,
+  // itself well past centre-distance threshold of 1000m + this site's own
+  // ~3.3km radius_m) — genuinely off-site, not just "far from the centroid".
+  const info = await lookupLandUse(36.8667294, 7.021440572109936);
+  assert.equal(info.context, 'natural');
+});
 
 test('lookupLandUse: local index — Bellara steel complex is industrial, with a name', async () => {
   useRealLocalIndex();

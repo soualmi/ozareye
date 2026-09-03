@@ -23,10 +23,19 @@
 //
 // The bbox is split into ~1°×1° tiles (about 48 for Algeria's configured
 // -2.5,34,9,37.3) and queried one tile at a time, `nwr` (node+way+relation)
-// with `out center` — polygons come back as a centroid, not full geometry,
-// to keep each request light. Overpass's own bbox order is south,west,north,east
-// — the opposite pairing from this project's west,south,east,north convention
-// (see scripts/build-villages.ts).
+// with `out bb` — real bounds for a way/relation (no full geometry, so this
+// stays light: no `out geom`), lat/lon directly for a node. `out center`
+// alone would have been simpler, but Overpass's own "center" is defined as
+// exactly the midpoint of the bounding box (verified numerically against a
+// live query before writing this) — so `out bb` gives strictly MORE
+// information (the real footprint, not just its midpoint) for the same
+// query cost, and the midpoint is derived from it below instead of asking
+// Overpass for both (which either times out as invalid combined syntax
+// `out center bb`, or — as two separate `out` statements — silently only
+// keeps the fields from whichever statement ran last, not both).
+// Overpass's own bbox order is south,west,north,east — the opposite pairing
+// from this project's west,south,east,north convention (see
+// scripts/build-villages.ts).
 //
 // overpass-api.de refuses connections outright from the production VPS; the
 // full-planet mirrors (never overpass.osm.ch — regional, see lib/landuse.ts)
@@ -41,7 +50,7 @@ import path from 'node:path';
 import { distanceKm } from '../lib/geo';
 import { displayName } from '../lib/place-name';
 import { preferIpv4 } from '../lib/prefer-ipv4';
-import { OVERPASS_ENDPOINTS, INDUSTRIAL_TAG_DEFS, industrialTagLabel, type IndustrialSite } from '../lib/landuse';
+import { OVERPASS_ENDPOINTS, INDUSTRIAL_TAG_DEFS, industrialTagLabel, type IndustrialSite, type Bounds } from '../lib/landuse';
 
 preferIpv4();
 
@@ -49,9 +58,8 @@ type Bbox = { west: number; south: number; east: number; north: number };
 type OverpassElement = {
   type: 'node' | 'way' | 'relation';
   id: number;
-  lat?: number; lon?: number;
-  center?: { lat: number; lon: number };
-  bounds?: { minlat: number; minlon: number; maxlat: number; maxlon: number };
+  lat?: number; lon?: number; // nodes only, from `out bb`
+  bounds?: Bounds; // ways/relations only, from `out bb`
   tags?: Record<string, string>;
 };
 type OverpassResult = { elements: OverpassElement[] };
@@ -85,7 +93,7 @@ function tilesFor(bbox: Bbox): Bbox[] {
 function tileQuery(tile: Bbox): string {
   const box = `${tile.south},${tile.west},${tile.north},${tile.east}`;
   const clauses = INDUSTRIAL_TAG_DEFS.map(t => `nwr["${t.key}"="${t.value}"](${box});`).join('\n  ');
-  return `[out:json][timeout:${TILE_QUERY_TIMEOUT_S}];\n(\n  ${clauses}\n);\nout center;`;
+  return `[out:json][timeout:${TILE_QUERY_TIMEOUT_S}];\n(\n  ${clauses}\n);\nout bb;`;
 }
 
 // Mirrors are flaky under load (timeouts, 504s) — this is a slow, patient
@@ -132,19 +140,24 @@ function toSite(el: OverpassElement): IndustrialSite | null {
   const tag = classify(el.tags);
   if (!tag) return null;
 
-  const lat = el.type === 'node' ? el.lat : el.center?.lat;
-  const lon = el.type === 'node' ? el.lon : el.center?.lon;
-  if (lat === undefined || lon === undefined) return null;
-
-  let radius_m: number | null = null;
-  if (el.bounds) {
+  let lat: number, lon: number, bounds: Bounds | null = null, radius_m: number | null = null;
+  if (el.type === 'node') {
+    if (el.lat === undefined || el.lon === undefined) return null;
+    lat = el.lat; lon = el.lon;
+  } else {
+    if (!el.bounds) return null; // no footprint at all — drop rather than guess
+    bounds = el.bounds;
+    // Overpass's own `out center` is defined as exactly this midpoint —
+    // verified numerically against a live query before writing this.
+    lat = (el.bounds.minlat + el.bounds.maxlat) / 2;
+    lon = (el.bounds.minlon + el.bounds.maxlon) / 2;
     const diagonalKm = distanceKm(el.bounds.minlat, el.bounds.minlon, el.bounds.maxlat, el.bounds.maxlon);
     radius_m = Math.round((diagonalKm * 1000) / 2);
   }
 
   const name = el.tags.name ? displayName({ name: el.tags.name, name_ar: el.tags['name:ar'], 'name:fr': el.tags['name:fr'] }) : null;
 
-  return { osm_id: `${el.type}/${el.id}`, type: el.type, tag, name, lat, lon, radius_m };
+  return { osm_id: `${el.type}/${el.id}`, type: el.type, tag, name, lat, lon, bounds, radius_m };
 }
 
 type Progress = { bbox: Bbox; completedTileIndexes: number[]; sitesById: Record<string, IndustrialSite> };
@@ -212,9 +225,16 @@ async function main() {
   for (const s of sites) perTag[s.tag] = (perTag[s.tag] ?? 0) + 1;
   const sizeKb = (fs.statSync(outPath).size / 1024).toFixed(1);
 
+  const withBounds = sites.filter(s => s.bounds !== null).length;
+
   console.log(`\nWrote ${sites.length} industrial site(s) to ${outPath} (${sizeKb} KB).`);
+  console.log(`${withBounds} of ${sites.length} have real bounds (ways/relations); ${sites.length - withBounds} are nodes (point only).`);
   console.log('Per-tag counts:');
   for (const [tag, count] of Object.entries(perTag).sort((a, b) => b[1] - a[1])) console.log(`  ${tag}: ${count}`);
+
+  const largest = sites.filter(s => s.radius_m !== null).sort((a, b) => b.radius_m! - a.radius_m!).slice(0, 10);
+  console.log('\nLargest 10 sites by radius_m:');
+  for (const s of largest) console.log(`  ${s.radius_m}m — ${s.name ?? '(unnamed)'} (${s.osm_id})`);
 }
 
 main().catch(error => {
