@@ -235,7 +235,15 @@ npm run replay -- 2026-08-26                                     # one day, defa
 npm run replay -- --from 2026-08-25 --to 2026-08-29 \
   --db data/replay-20260826.db --out replay-out/20260826         # a range
 npm run replay -- --out replay-out/20260826 --render-only        # rebuild report.md only
+npm run replay -- --db data/replay-20260826.db \
+  --out replay-out/20260826 --reevaluate-landuse                 # re-score land-use, no re-fetch
 ```
+
+`--reevaluate-landuse` re-scores every event already stored at `--db` against
+the CURRENT `lookupLandUse()` (the local index, see section 5.4) and
+re-renders `report.md`/`messages/` — no FIRMS or weather calls. Useful for a
+replay run made before `data/industrial-sites.json` existed, when Overpass
+was the only path and may have been unreachable.
 
 Each day is walked in 20-minute buckets, the production cron cadence, so an
 event is only ever scored and rendered on the evidence that poll would have
@@ -299,6 +307,33 @@ the effort before starting:
    want to avoid depending on the public Overpass API being up.
    - Re-run the test suite and a replay (section 4.6) against known past fires
      in your area to sanity-check the new index before trusting it live.
+
+4. **The industrial-site index.** `data/industrial-sites.json` is a flat
+   array of `{osm_id, type, tag, name, lat, lon, radius_m}`, built **once,
+   offline**, the same way as the village index — `lib/landuse.ts` (which
+   tags a detection sitting on a known industrial/energy site: a steel plant,
+   a gas flare, a quarry, a landfill, ...) never queries Overpass at request
+   time as long as this file exists. To rebuild it (or regenerate it for a
+   new region's bbox, from the region's config):
+   ```bash
+   npm run build-industrial-index
+   ```
+   It walks the configured bbox in ~1°×1° tiles, one Overpass query per tile
+   (retried across the same full-planet mirrors `lib/landuse.ts` uses —
+   never a regional extract, see the comment there), with a pause between
+   tiles and a progress checkpoint (`data/.industrial-index-progress.json`,
+   gitignored) written after every tile, so a killed/crashed run resumes
+   instead of starting over. This is a slow, occasional job (tens of minutes
+   over the public mirrors) — land use doesn't change, so it's meant to be
+   run once and re-run only after a bbox change, not on any schedule.
+   `lib/landuse.ts` falls back to a live Overpass lookup (same
+   breaker/mirror logic as before) only when this file is missing or
+   unreadable — e.g. a fresh clone that hasn't run the build script yet.
+   After building the index for the first time on a running instance,
+   `npx tsx scripts/backfill-landuse.ts` re-evaluates every stored event
+   still sitting at `landUse.context: 'unknown'` (left over from when
+   Overpass was the only path) against the new local index — events already
+   tagged `industrial`/`natural` are left untouched.
 
 ## 6. The dashboard
 

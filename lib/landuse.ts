@@ -14,27 +14,99 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-// Land-use context lookup (OpenStreetMap/Overpass): tells the engine WHAT
-// sits under a detection, so a permanent industrial/energy heat source (a
-// steel plant, a gas flare, a quarry, a landfill) isn't presented to a
-// reader as a probable wildfire — the incident that prompted this was a
-// detection landing exactly on Complexe Sidérurgique de Bellara.
+// Land-use context lookup: tells the engine WHAT sits under a detection, so a
+// permanent industrial/energy heat source (a steel plant, a gas flare, a
+// quarry, a landfill) isn't presented to a reader as a probable wildfire —
+// the incident that prompted this was a detection landing exactly on
+// Complexe Sidérurgique de Bellara.
 //
 // This is immediate, first-detection context — it complements, not
 // replaces, the 30-day persistent-source guard in app/api/monitor/route.ts,
 // which has no way to know about a site in advance and instead catches
 // unnamed recurring sources purely from their detection history over time.
 //
-// Fails soft by design: any Overpass error or timeout returns context
-// 'unknown' and the event proceeds exactly as it did before this feature
-// existed — never blocked, never dropped.
+// Land use doesn't change, so the default path is a LOCAL lookup against
+// data/industrial-sites.json — built once, offline, by
+// scripts/build-industrial-index.ts (see README) — instead of a live
+// Overpass query on every detection. overpass-api.de refuses connections
+// from the production VPS entirely and the full-planet mirrors answer in
+// 25-35s each, which made land-use effectively off in prod; a local index
+// resolves in well under a millisecond and has no network dependency at all.
+//
+// Overpass is kept as an explicit FALLBACK, used only when the index file is
+// missing or unreadable (e.g. a fresh clone that hasn't run the build script
+// yet) — same breaker/mirror logic as before, so that path still fails soft.
+import fs from 'node:fs';
+import path from 'node:path';
+import { distanceKm } from './geo';
 import { gridCell } from './fire-monitor';
 import { preferIpv4 } from './prefer-ipv4';
 import type { LandUseContext, LandUseInfo } from './fire-monitor';
 
 export type { LandUseContext, LandUseInfo };
 
+// A site this close to a detection (plus its own footprint, see radius_m
+// below) counts as a hit — same 1km figure the old per-point Overpass query
+// used as its search radius.
 const RADIUS_M = 1000;
+
+// ---------------------------------------------------------------------------
+// Local index lookup (the default path)
+// ---------------------------------------------------------------------------
+
+export type IndustrialSite = {
+  osm_id: string;
+  type: 'node' | 'way' | 'relation';
+  tag: string; // e.g. "landuse=industrial" — which of the 7 tags matched
+  name: string | null; // displayName() already applied at build time — never Tifinagh
+  lat: number;
+  lon: number;
+  /** Half the bbox diagonal Overpass returned for a way/relation, in metres.
+   *  null for nodes (a point has no footprint) and for the rare way/relation
+   *  Overpass returned no bounds for. */
+  radius_m: number | null;
+};
+
+// Overridable so tests can point at a throwaway (or deliberately missing)
+// file instead of the real shipped index — same pattern as
+// ALGERIE_FEUX_DB_PATH in lib/db/sqlite.ts.
+function indexPath(): string {
+  return process.env.ALGERIE_FEUX_INDUSTRIAL_INDEX_PATH || path.join(process.cwd(), 'data', 'industrial-sites.json');
+}
+
+// undefined = not loaded yet; null = load failed (missing/unreadable) and
+// Overpass is the fallback for the rest of the process lifetime.
+let indexCache: IndustrialSite[] | null | undefined;
+
+function loadIndex(): IndustrialSite[] | null {
+  if (indexCache !== undefined) return indexCache;
+  try {
+    indexCache = JSON.parse(fs.readFileSync(indexPath(), 'utf8')) as IndustrialSite[];
+  } catch {
+    indexCache = null;
+  }
+  return indexCache;
+}
+
+// Linear scan: data/industrial-sites.json holds a few thousand points for
+// Algeria's full bbox, so even an unindexed pass over all of them is well
+// under a millisecond — nowhere near the ≪10ms budget for a per-detection
+// lookup. Revisit with a lat/lon grid bucket only if a future region's index
+// grows into the tens of thousands.
+function lookupLocal(sites: IndustrialSite[], lat: number, lon: number): LandUseInfo {
+  let best: { site: IndustrialSite; distanceM: number } | null = null;
+  for (const site of sites) {
+    const distanceM = distanceKm(lat, lon, site.lat, site.lon) * 1000;
+    if (distanceM > RADIUS_M + (site.radius_m ?? 0)) continue;
+    if (!best || distanceM < best.distanceM) best = { site, distanceM };
+  }
+  if (!best) return { context: 'natural' };
+  return { context: 'industrial', siteName: best.site.name ?? undefined };
+}
+
+// ---------------------------------------------------------------------------
+// Overpass fallback (only reached when the local index is absent/unreadable)
+// ---------------------------------------------------------------------------
 
 // Tried strictly in order until one answers. The canonical instance stays the
 // default — it is the one this query's size is polite against — but a single
@@ -47,8 +119,9 @@ const RADIUS_M = 1000;
 // than a failure. overpass.osm.ch looked like an ideal mirror on 2026-09-03
 // (0.16s, healthy) and is Switzerland-only: it reported Bellara and the El
 // Hamma power plant as 'natural'. Verify any new entry with a query over the
-// target region before adding it.
-const OVERPASS_ENDPOINTS = [
+// target region before adding it. Also used by scripts/build-industrial-index.ts
+// to build the local index in the first place.
+export const OVERPASS_ENDPOINTS = [
   'https://overpass-api.de/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
   'https://overpass.private.coffee/api/interpreter',
@@ -83,23 +156,32 @@ function breakerOpen(now: number): boolean {
 
 // Tags that mark a probable non-wildfire, permanent heat-producing or
 // non-vegetation site. Not exhaustive — this is a coarse first-detection
-// filter, not a land-registry survey.
-const INDUSTRIAL_TAGS = [
-  '["landuse"="industrial"]',
-  '["man_made"="works"]',
-  '["power"="plant"]',
-  '["power"="generator"]',
-  '["landuse"="quarry"]',
-  '["man_made"="chimney"]',
-  '["landuse"="landfill"]',
+// filter, not a land-registry survey. Exported as structured defs so
+// scripts/build-industrial-index.ts can build its own bbox query and classify
+// results from the exact same list instead of a second copy.
+export const INDUSTRIAL_TAG_DEFS: { key: string; value: string }[] = [
+  { key: 'landuse', value: 'industrial' },
+  { key: 'man_made', value: 'works' },
+  { key: 'power', value: 'plant' },
+  { key: 'power', value: 'generator' },
+  { key: 'landuse', value: 'quarry' },
+  { key: 'man_made', value: 'chimney' },
+  { key: 'landuse', value: 'landfill' },
 ];
+
+export function industrialTagLabel(key: string, value: string): string {
+  return `${key}=${value}`;
+}
+
+const INDUSTRIAL_TAGS = INDUSTRIAL_TAG_DEFS.map(t => `["${t.key}"="${t.value}"]`);
 
 // One process-lifetime cache entry per ~1km cell (same rounding as the
 // persistent-source guard's gridCell in lib/fire-monitor.ts) — a site like
 // Bellara gets queried once, not once per repeat detection. Only successful
 // lookups are cached; a failure is left uncached so the next poll retries
 // instead of an event sticking as 'unknown' forever because of one bad
-// network blip.
+// network blip. Only used on the Overpass fallback path — the local index
+// above needs no cache, it's already well under a millisecond per lookup.
 const cache = new Map<string, LandUseInfo>();
 
 function overpassQuery(lat: number, lon: number): string {
@@ -110,7 +192,7 @@ function overpassQuery(lat: number, lon: number): string {
 type OverpassElement = { tags?: Record<string, string> };
 type OverpassResponse = { elements?: OverpassElement[] };
 
-export async function lookupLandUse(lat: number, lon: number): Promise<LandUseInfo> {
+async function lookupLandUseOverpass(lat: number, lon: number): Promise<LandUseInfo> {
   preferIpv4();
   const cell = gridCell(lat, lon);
   const cached = cache.get(cell);
@@ -152,5 +234,22 @@ export async function lookupLandUse(lat: number, lon: number): Promise<LandUseIn
   return { context: 'unknown' };
 }
 
-// Test-only: clears the process-lifetime cache between test cases.
-export function _clearCacheForTests() { cache.clear(); consecutiveFailures = 0; breakerOpenedAt = 0; }
+// ---------------------------------------------------------------------------
+// Public entry point
+// ---------------------------------------------------------------------------
+
+export async function lookupLandUse(lat: number, lon: number): Promise<LandUseInfo> {
+  const sites = loadIndex();
+  if (sites) return lookupLocal(sites, lat, lon);
+  return lookupLandUseOverpass(lat, lon);
+}
+
+// Test-only: clears the process-lifetime caches (Overpass cache/breaker AND
+// the loaded index, so a test that changes ALGERIE_FEUX_INDUSTRIAL_INDEX_PATH
+// actually reloads from the new path) between test cases.
+export function _clearCacheForTests() {
+  cache.clear();
+  consecutiveFailures = 0;
+  breakerOpenedAt = 0;
+  indexCache = undefined;
+}

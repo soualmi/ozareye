@@ -16,19 +16,41 @@
 
 // Proves the actual requirements from the Bellara incident: a lookup that
 // hits a known industrial site is flagged (with its name, when OSM has one),
-// a lookup with no industrial features nearby is not, a failed/timed-out
-// Overpass call fails soft (context 'unknown', never throws — same shape as
-// fetchDetections/enrichWeather in fire-monitor.ts), and repeat lookups in
-// the same ~1km cell never re-query Overpass.
+// a lookup with no industrial features nearby is not, and — since land-use
+// moved to a local index (data/industrial-sites.json, built once offline by
+// scripts/build-industrial-index.ts) with Overpass kept only as a fallback —
+// a failed/timed-out Overpass call still fails soft (context 'unknown',
+// never throws) when that fallback is the one being exercised. Most tests
+// here force the fallback open by pointing the index at a file that doesn't
+// exist (see MISSING_INDEX_PATH below); a handful at the end use the real
+// shipped index instead.
 import assert from 'node:assert/strict';
 import { test, before, after, beforeEach } from 'node:test';
 import { lookupLandUse, _clearCacheForTests } from './landuse';
 import { industrialContextLine, lowerStatus, telegramText, type FireEvent, type Detection } from './fire-monitor';
 
+// Overpass is now only a FALLBACK, reached when the local index
+// (data/industrial-sites.json) is absent or unreadable — see lib/landuse.ts.
+// Every test below that mocks `fetch` needs that fallback path forced open,
+// so beforeEach points the index at a file that doesn't exist. The handful
+// of tests proving the real local index (Bellara/El Hamma/Chréa) undo this
+// for just their own call.
+const MISSING_INDEX_PATH = '/nonexistent/industrial-sites-test.json';
+
 let originalFetch: typeof fetch;
-before(() => { originalFetch = global.fetch; });
-after(() => { global.fetch = originalFetch; });
-beforeEach(() => { _clearCacheForTests(); });
+let originalIndexPath: string | undefined;
+before(() => { originalFetch = global.fetch; originalIndexPath = process.env.ALGERIE_FEUX_INDUSTRIAL_INDEX_PATH; });
+after(() => {
+  global.fetch = originalFetch;
+  if (originalIndexPath === undefined) delete process.env.ALGERIE_FEUX_INDUSTRIAL_INDEX_PATH;
+  else process.env.ALGERIE_FEUX_INDUSTRIAL_INDEX_PATH = originalIndexPath;
+});
+beforeEach(() => { process.env.ALGERIE_FEUX_INDUSTRIAL_INDEX_PATH = MISSING_INDEX_PATH; _clearCacheForTests(); });
+
+function useRealLocalIndex() {
+  delete process.env.ALGERIE_FEUX_INDUSTRIAL_INDEX_PATH;
+  _clearCacheForTests();
+}
 
 function overpassResponse(elements: { tags?: Record<string, string> }[]) {
   return new Response(JSON.stringify({ elements }), { status: 200 });
@@ -206,4 +228,38 @@ test('lookupLandUse: a success resets the failure count', async () => {
   global.fetch = (async () => { reached = true; return overpassResponse([{ tags: { landuse: 'quarry' } }]); }) as typeof fetch;
   await lookupLandUse(37.5, 6.5);
   assert.ok(reached, 'the breaker must not be open after an intervening success');
+});
+
+// --- local index (the default path) -----------------------------------------
+// These four hit the REAL shipped data/industrial-sites.json — no fetch mock,
+// no network. They're the actual requirement this rewrite exists for: a
+// local, offline lookup that resolves the incidents that motivated it
+// (Bellara, the El Hamma plant) without depending on Overpass being up.
+
+test('lookupLandUse: local index — Bellara steel complex is industrial, with a name', async () => {
+  useRealLocalIndex();
+  const info = await lookupLandUse(36.7495, 6.2520);
+  assert.equal(info.context, 'industrial');
+  assert.ok(info.siteName, 'expected a site name from the local index');
+});
+
+test('lookupLandUse: local index — El Hamma power plant (Algiers) is industrial', async () => {
+  useRealLocalIndex();
+  const info = await lookupLandUse(36.7490, 3.0825);
+  assert.equal(info.context, 'industrial');
+});
+
+test('lookupLandUse: local index — Chréa forest (Blida) is natural, no industrial site nearby', async () => {
+  useRealLocalIndex();
+  const info = await lookupLandUse(36.42, 2.86);
+  assert.equal(info.context, 'natural');
+});
+
+test('lookupLandUse: a missing index file falls back to Overpass, which still fails soft as "unknown"', async () => {
+  // beforeEach already points ALGERIE_FEUX_INDUSTRIAL_INDEX_PATH at a file
+  // that doesn't exist — this is the default state for every test above,
+  // made explicit here as the thing actually under test.
+  global.fetch = (async () => { throw new TypeError('fetch failed'); }) as typeof fetch;
+  const info = await lookupLandUse(36.0, 5.0);
+  assert.equal(info.context, 'unknown');
 });
