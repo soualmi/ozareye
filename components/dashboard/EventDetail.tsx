@@ -53,8 +53,18 @@ export default function EventDetail({ event, onBack }: { event: DashboardEvent; 
       {/* 1. Status headline */}
       <div className="mb-3 flex items-center gap-2">
         <span className="h-2.5 w-2.5 rounded-full" style={{ background: event.status === 'urgent' ? '#ff5b32' : event.status === 'corroborated' ? '#f5b942' : '#4fa37a' }} />
-        <h2 className="text-base font-semibold">Anomalie thermique — probablement un feu</h2>
+        <h2 className="text-base font-semibold">{event.title}</h2>
       </div>
+
+      {/* 1b. Industrial context leads — right under the title, before
+          anything else. A known industrial/energy site is the single most
+          important thing a reader needs before the narrative, the intensity
+          wording, or the villages below, not a note buried under them. */}
+      {event.industrialLeadLine && (
+        <div className="mb-3 rounded-xl border border-[#f5b942]/40 bg-[#f5b942]/10 p-3 text-xs text-[#f5d98a]">
+          🏭 {event.industrialLeadLine}
+        </div>
+      )}
 
       {/* Item 2: what the passes actually establish. Repetition proves the
           heat source persisted, not that it is a vegetation fire, and never
@@ -63,17 +73,12 @@ export default function EventDetail({ event, onBack }: { event: DashboardEvent; 
 
       {/* 2. One paragraph */}
       <p className="mb-4 leading-relaxed text-[#c9dbd3]">
-        Anomalie thermique détectée par satellite{wilayaBit}, probablement un feu de végétation (mais peut être un brûlage agricole ou une source industrielle — à vérifier).
+        {event.landUseContext === 'industrial'
+          ? <>Anomalie thermique détectée par satellite{wilayaBit}, sur un site industriel connu (voir ci-dessus).</>
+          : <>Anomalie thermique détectée par satellite{wilayaBit}, probablement un feu de végétation (mais peut être un brûlage agricole ou une source industrielle — à vérifier).</>}
         {' '}{event.ageMinutes > 0 ? `Détectée il y a ${age} — il s'agit de` : 'Il s\u2019agit de'} l&apos;heure de détection par satellite, pas nécessairement du début du feu, qui a pu commencer plus tôt.
         {' '}{capitalize(event.magnitude)}.
       </p>
-
-      {/* 2b. Land-use context, when the site is a known industrial/energy feature */}
-      {event.industrialNote && (
-        <div className="mb-4 rounded-xl border border-[#f5b942]/40 bg-[#f5b942]/10 p-3 text-xs text-[#f5d98a]">
-          🏭 {event.industrialNote}
-        </div>
-      )}
 
       {/* 3. CONSTATÉ / PROBABLE */}
       <div className="mb-3 rounded-xl border border-white/10 bg-[#07130f] p-3">

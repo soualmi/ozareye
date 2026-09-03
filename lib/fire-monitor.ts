@@ -318,9 +318,13 @@ export function confidenceLabel(c: string): string {
 }
 
 // Same FRP/size breakpoints scoreEvent uses to score the event — in words,
-// not a fabricated hectare figure this data can't support.
-export function magnitudeLabel(maxFrp: number, maxPixelsInSinglePass: number, frpThresholdMw = DEFAULT_FRP_THRESHOLD_MW): string {
-  if (maxFrp >= frpThresholdMw || maxPixelsInSinglePass >= 3) return 'signal intense, feu probablement étendu';
+// not a fabricated hectare figure this data can't support. The breakpoints
+// themselves never change for an industrial-context event (isIndustrial only
+// swaps which STRING the top breakpoint returns) — a known industrial/energy
+// site never claims "feu probablement étendu" for what's very likely a
+// permanent heat source, not a vegetation fire (see lib/landuse.ts).
+export function magnitudeLabel(maxFrp: number, maxPixelsInSinglePass: number, frpThresholdMw = DEFAULT_FRP_THRESHOLD_MW, isIndustrial = false): string {
+  if (maxFrp >= frpThresholdMw || maxPixelsInSinglePass >= 3) return isIndustrial ? 'signal intense pour ce site' : 'signal intense, feu probablement étendu';
   if (maxFrp >= frpThresholdMw * 0.4) return 'signal modéré';
   return 'signal faible, foyer localisé';
 }
@@ -498,6 +502,19 @@ export function industrialContextLine(siteName?: string): string {
   return `Détection sur zone industrielle connue${site} — probablement une source de chaleur permanente, pas un feu. À vérifier.`;
 }
 
+// Dashboard-only counterpart to industrialContextLine() above (Telegram keeps
+// that wording, unchanged, just repositioned — see telegramText()). This one
+// names the plausible peacetime source explicitly and is meant to lead the
+// list card/popup/detail views, not trail them — the incident that prompted
+// this was a Skikda detail panel still opening with "probablement un feu"
+// for an event sitting on the Sonatrach petrochemical zone, with this exact
+// context buried below the narrative instead of leading it.
+export function industrialLeadLine(siteName?: string): string {
+  const cleaned = siteName ? stripTifinagh(siteName) : '';
+  const site = cleaned ? isolateIfArabic(cleaned) : 'Site industriel connu';
+  return `${site} — probablement une source de chaleur permanente (torchère, four, cheminée), pas un feu de végétation. À vérifier si le signal est inhabituel pour ce site.`;
+}
+
 export function telegramText(event: FireEvent, referenceTime = new Date(), proximityKm = DEFAULT_PROXIMITY_KM) {
   const icon = event.status === 'urgent' ? '🔴' : '🟠';
   const shown = selectExposedVillages(event, proximityKm);
@@ -515,7 +532,10 @@ export function telegramText(event: FireEvent, referenceTime = new Date(), proxi
     ? ` vent ${event.windKph} km/h → ${cardinalFr(event.windDirectionFromDeg + 180)}` : '';
   const wilaya = eventWilaya(event);
   const locationBit = wilaya ? ` · ${wilaya}` : '';
+  // Leads the message, right after the title — a known industrial/energy
+  // site is the single most important thing a reader needs before anything
+  // else (villages, FRP, evidence), not a note trailing behind them.
   const industrialBit = event.landUse?.context === 'industrial' ? `🏭 ${industrialContextLine(event.landUse.siteName)}\n\n` : '';
 
-  return `${icon} ${LABELS.headline} — À VÉRIFIER\n\n${villageLines}\n\n📍${event.latitude.toFixed(4)},${event.longitude.toFixed(4)}${locationBit} ${algiersTime(event.lastAcquiredAt)}Alger(${ageMin}min) ${event.detections[event.detections.length - 1].instrument} FRP${event.maxFrp.toFixed(1)}MW\nPreuves: ${event.evidenceShort.join('·')}${windBit}\n\n${industrialBit}⚠️${LABELS.disclaimer}\nNASA FIRMS·Open-Meteo`;
+  return `${icon} ${LABELS.headline} — À VÉRIFIER\n\n${industrialBit}${villageLines}\n\n📍${event.latitude.toFixed(4)},${event.longitude.toFixed(4)}${locationBit} ${algiersTime(event.lastAcquiredAt)}Alger(${ageMin}min) ${event.detections[event.detections.length - 1].instrument} FRP${event.maxFrp.toFixed(1)}MW\nPreuves: ${event.evidenceShort.join('·')}${windBit}\n\n⚠️${LABELS.disclaimer}\nNASA FIRMS·Open-Meteo`;
 }

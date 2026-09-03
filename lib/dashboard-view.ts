@@ -20,8 +20,8 @@
 // no fabricated trajectories). Telegram's telegramText() is untouched and
 // unrelated to this.
 import {
-  LABELS, algiersTime, confidenceLabel, distinctPasses, eventWilaya, industrialContextLine, magnitudeLabel, minutesSince, selectExposedVillages,
-  type FireEvent,
+  LABELS, algiersTime, confidenceLabel, distinctPasses, eventWilaya, industrialLeadLine, magnitudeLabel, minutesSince, selectExposedVillages,
+  type FireEvent, type LandUseContext,
 } from './fire-monitor';
 import { satelliteName } from './satellite-names';
 import { withDisplayName } from './place-name';
@@ -43,8 +43,28 @@ export function sourceStatusLine(passCount: number): string {
     : 'Passage satellite unique — non confirmé au sol';
 }
 
+// Display hierarchy fix: an industrial-context event must lead with that
+// context (title + first line), not bury it below a "probablement un feu"
+// framing — see EventDetail/Map/EventList, all of which render these instead
+// of a hardcoded string. Colour/status are untouched here: lowerStatus()
+// already downgraded them one step upstream (app/api/monitor/route.ts).
+export function eventTitle(context?: LandUseContext): string {
+  return context === 'industrial' ? 'Anomalie thermique — site industriel connu' : 'Anomalie thermique — probablement un feu';
+}
+
+// The list card's "near <feature>" line: the known industrial/energy site
+// (when the event carries one) leads instead of the nearest village, since
+// that site is the reason the event was already flagged industrial in the
+// first place — a village line under it would bury the same context this
+// whole fix exists to surface.
+export function nearestFeatureLine(context: LandUseContext | undefined, siteName: string | undefined, nearestVillageName: string | undefined): string | undefined {
+  if (context === 'industrial') return `🏭 ${siteName ?? 'site industriel connu'}`;
+  return nearestVillageName ? `près de ${nearestVillageName}` : undefined;
+}
+
 export function toDashboardEvent(event: FireEvent, referenceTime: Date = new Date(), frpThresholdMw?: number, proximityKm?: number) {
   const last = event.detections[event.detections.length - 1];
+  const isIndustrial = event.landUse?.context === 'industrial';
   return {
     id: event.id,
     latitude: event.latitude, longitude: event.longitude,
@@ -57,13 +77,14 @@ export function toDashboardEvent(event: FireEvent, referenceTime: Date = new Dat
     passCount: event.passCount, maxPixelsInSinglePass: event.maxPixelsInSinglePass,
     confidenceLabel: confidenceLabel(event.maxConfidence),
     sourceStatusLine: sourceStatusLine(event.passCount),
-    magnitude: magnitudeLabel(event.maxFrp, event.maxPixelsInSinglePass, frpThresholdMw),
+    magnitude: magnitudeLabel(event.maxFrp, event.maxPixelsInSinglePass, frpThresholdMw, isIndustrial),
     passes: distinctPasses(event).map(p => ({ ...p, satellite: satelliteName(p.satellite), acquiredAtAlgiers: algiersTime(p.acquiredAt) })),
     evidenceShort: event.evidenceShort,
     selection: selectExposedVillages(event, proximityKm).map(s => ({ ...s, village: withDisplayName(s.village) })),
     disclaimer: LABELS.disclaimer,
     landUseContext: event.landUse?.context,
     landUseSiteName: event.landUse?.siteName,
-    industrialNote: event.landUse?.context === 'industrial' ? industrialContextLine(event.landUse.siteName) : undefined,
+    title: eventTitle(event.landUse?.context),
+    industrialLeadLine: isIndustrial ? industrialLeadLine(event.landUse!.siteName) : undefined,
   };
 }

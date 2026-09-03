@@ -134,14 +134,16 @@ function FirePopup({ event, onDetail }: { event: DashboardEvent; onDetail: (id: 
   const magnitudeShort = event.magnitude.split(',')[0];
   return (
     <div style={{ fontSize: 12, lineHeight: 1.5, minWidth: 180 }}>
-      <strong>Anomalie thermique — probablement un feu</strong>
+      <strong>{event.title}</strong>
+      {/* Industrial context leads, right under the title — same hierarchy
+          fix as the detail panel, not a note trailing at the bottom. */}
+      {event.industrialLeadLine && <div style={{ marginTop: 4, color: '#f5b942' }}>🏭 {event.industrialLeadLine}</div>}
       <div>{[nearest, wilayaLabel(event.wilaya)].filter(Boolean).join(' · ')}</div>
       <div>{capitalize(magnitudeShort)}</div>
       <div>Dernier passage satellite : {event.detectedAtAlgiers} (Alger)</div>
       <div>Détectée il y a {formatAge(event.ageMinutes)}</div>
       <div style={{ marginTop: 4 }}>{event.sourceStatusLine}</div>
       <div>{proximityCount} village(s) à proximité, {downwindCount} sous le vent</div>
-      {event.industrialNote && <div style={{ marginTop: 4, color: '#f5b942' }}>🏭 {event.industrialNote}</div>}
       <button
         onClick={() => onDetail(event.id)}
         style={{ marginTop: 6, width: '100%', border: 'none', borderRadius: 6, background: '#45d892', color: '#062017', fontWeight: 600, padding: '5px 8px', cursor: 'pointer' }}

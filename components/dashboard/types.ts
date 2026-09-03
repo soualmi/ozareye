@@ -44,5 +44,6 @@ export type DashboardEvent = {
   disclaimer: string;
   landUseContext?: LandUseContext;
   landUseSiteName?: string;
-  industrialNote?: string;
+  title: string;
+  industrialLeadLine?: string;
 };

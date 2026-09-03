@@ -22,6 +22,7 @@ import { useEffect, useMemo, useState } from 'react';
 import EventDetail from '@/components/dashboard/EventDetail';
 import { formatDetectedAgo, wilayaLabel } from '@/components/dashboard/format';
 import { displayName } from '@/lib/place-name';
+import { nearestFeatureLine } from '@/lib/dashboard-view';
 import type { DashboardEvent, SourceStatus } from '@/components/dashboard/types';
 
 const DashboardMap = dynamic(() => import('@/components/dashboard/Map'), { ssr: false, loading: () => <div className="grid h-full place-items-center text-sm text-[#8da79d]">Chargement de la carte…</div> });
@@ -254,6 +255,10 @@ function EventList({ events, onSelect, emptyMessage }: { events: DashboardEvent[
     <div className="space-y-2 p-3">
       {events.map(ev => {
         const top = ev.selection[0]?.village;
+        // Display hierarchy fix: an industrial-context event leads with the
+        // known site instead of the nearest village — that site is the
+        // reason it was already flagged industrial in the first place.
+        const nearestLine = nearestFeatureLine(ev.landUseContext, ev.landUseSiteName, top ? displayName(top) : undefined);
         return (
           <button key={ev.id} onClick={() => onSelect(ev.id)} className="w-full rounded-xl border border-white/10 bg-[#07130f] p-3 text-left hover:border-white/20">
             <div className="flex items-center justify-between gap-2">
@@ -263,7 +268,7 @@ function EventList({ events, onSelect, emptyMessage }: { events: DashboardEvent[
               </span>
               <span className="text-xs text-[#8da79d]">{ev.detectedAtAlgiers}</span>
             </div>
-            <p className="mt-1 text-xs text-[#8da79d]">FRP {ev.maxFrp.toFixed(1)}MW{top ? ` · près de ${displayName(top)}` : ''}</p>
+            <p className="mt-1 text-xs text-[#8da79d]">FRP {ev.maxFrp.toFixed(1)}MW{nearestLine ? ` · ${nearestLine}` : ''}</p>
             <p className="mt-1 text-[11px] text-[#8da79d]">{ev.sourceStatusLine}</p>
             {/* /history measures age from the event's own last pass, so its
                 events carry ageMinutes 0 — the absolute time is always shown,
