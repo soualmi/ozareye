@@ -226,17 +226,26 @@ npm run test:clustering
 
 ### 4.6 Try a historical replay before going live
 
-Shows the exact Telegram messages the engine would have produced for a past
-day, without sending anything — useful to sanity-check scoring and village
-selection before you trust it with real alerts:
+Re-runs the real pipeline over past FIRMS dates and writes down what the
+engine would have said — without sending anything — useful to sanity-check
+scoring and village selection before you trust it with real alerts:
 
 ```bash
-npm run replay -- 2026-08-26                    # default bbox (Béjaïa, Algeria)
-npm run replay -- 2026-08-26 4.2,36.1,5.6,37.0   # custom bbox: west,south,east,north
+npm run replay -- 2026-08-26                                     # one day, default paths
+npm run replay -- --from 2026-08-25 --to 2026-08-29 \
+  --db data/replay-20260826.db --out replay-out/20260826         # a range
+npm run replay -- --out replay-out/20260826 --render-only        # rebuild report.md only
 ```
 
+Each day is walked in 20-minute buckets, the production cron cadence, so an
+event is only ever scored and rendered on the evidence that poll would have
+had. Outputs land in `--out`: `events.json`, `report.md` (grouped by wilaya),
+`run-notes.md` (what differed from live) and `messages/*.txt` (rendered alert
+texts, never sent).
+
 Needs `FIRMS_MAP_KEY` in `.env.local`. Uses Open-Meteo's historical archive
-API, not current conditions.
+API, not current conditions. Writes only to `--db`, never to
+`data/signals.db` — it refuses to start if pointed at it.
 
 ## 5. Adapting to your region
 
