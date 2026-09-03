@@ -49,7 +49,10 @@ import { wilayaAt } from '../lib/wilaya';
 export type Bbox = { west: number; south: number; east: number; north: number };
 type OverpassElement = { type: string; id: number; lat: number; lon: number; tags?: Record<string, string> };
 type OverpassResult = { elements: OverpassElement[] };
-type Village = { osm_id: string; name: string; name_ar: string | null; lat: number; lon: number; place: string; wilaya: string };
+// `name:fr` is carried through so displayName() can prefer an explicit French
+// name over guessing at the Latin part of a mixed-script `name`. The shipped
+// index predates this and has none; it appears on the next regeneration.
+type Village = { osm_id: string; name: string; name_ar: string | null; 'name:fr'?: string | null; lat: number; lon: number; place: string; wilaya: string };
 export type BuildVillagesResult = { count: number; droppedOutsideBoundary: number; perRegion: Record<string, number> };
 
 export function bboxToString(bbox: Bbox): string {
@@ -91,7 +94,7 @@ out body;`;
     if (el.type !== 'node' || !el.tags?.name || !el.tags?.place) continue;
     const region = wilayaAt(el.lat, el.lon);
     if (!region) { droppedOutsideBoundary++; continue; }
-    out.push({ osm_id: `node/${el.id}`, name: el.tags.name, name_ar: el.tags['name:ar'] ?? null, lat: el.lat, lon: el.lon, place: el.tags.place, wilaya: region });
+    out.push({ osm_id: `node/${el.id}`, name: el.tags.name, name_ar: el.tags['name:ar'] ?? null, 'name:fr': el.tags['name:fr'] ?? null, lat: el.lat, lon: el.lon, place: el.tags.place, wilaya: region });
     perRegion[region] = (perRegion[region] ?? 0) + 1;
   }
 

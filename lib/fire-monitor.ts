@@ -17,6 +17,7 @@
 import villagesData from '@/data/villages.json';
 import { distanceKm } from './geo';
 import { cardinalFr, classifyExposure, type WindRelation } from './wind';
+import { isolatedDisplayName } from './place-name';
 import { wilayaAt } from './wilaya';
 
 // Real point-in-polygon wilaya attribution for a fire centroid — used both for
@@ -32,7 +33,7 @@ export type Detection = {
 };
 
 export type VillageExposure = {
-  osm_id: string; name: string; name_ar: string | null; wilaya: string;
+  osm_id: string; name: string; name_ar: string | null; 'name:fr'?: string | null; wilaya: string;
   lat: number; lon: number; // for the dashboard map
   distanceKm: number; relation: WindRelation; etaHours?: number;
 };
@@ -62,7 +63,7 @@ export type FireEvent = {
   notifiedAt?: string; notifiedScore?: number; notifiedStatus?: FireEvent['status'];
 };
 
-const villages = villagesData as { osm_id: string; name: string; name_ar: string | null; lat: number; lon: number; place: string; wilaya: string }[];
+const villages = villagesData as { osm_id: string; name: string; name_ar: string | null; 'name:fr'?: string | null; lat: number; lon: number; place: string; wilaya: string }[];
 
 // Exported so app/api/monitor/route.ts can mark all three as failed if the
 // run crashes before they're even polled (lib/source-health.ts watchdog) —
@@ -388,7 +389,7 @@ function computeExposedVillages(event: FireEvent): VillageExposure[] {
     if (distanceKmVal > EXPOSURE_RADIUS_KM) continue;
     const { relation } = classifyExposure(fire, { lat: v.lat, lon: v.lon }, windDirectionFromDeg);
     const etaHours = relation !== 'upwind' && event.windKph ? distanceKmVal / (event.windKph * SPREAD_FACTOR) : undefined;
-    results.push({ osm_id: v.osm_id, name: v.name, name_ar: v.name_ar, wilaya: v.wilaya, lat: v.lat, lon: v.lon, distanceKm: distanceKmVal, relation, etaHours });
+    results.push({ osm_id: v.osm_id, name: v.name, name_ar: v.name_ar, 'name:fr': v['name:fr'] ?? null, wilaya: v.wilaya, lat: v.lat, lon: v.lon, distanceKm: distanceKmVal, relation, etaHours });
   }
   const relationRank: Record<WindRelation, number> = { downwind: 0, marginal: 1, upwind: 2 };
   return results.sort((a, b) => relationRank[a.relation] - relationRank[b.relation] || a.distanceKm - b.distanceKm);
@@ -446,14 +447,10 @@ export function selectExposedVillages(event: FireEvent, proximityKm = DEFAULT_PR
   return [...proximity.map(village => ({ village, isProximity: true })), ...downwind.map(village => ({ village, isProximity: false }))];
 }
 
-// Village names still legitimately mix scripts (name + name_ar, or a Kabyle
-// name — that's the real place name, untouched). A Latin name directly against
-// an Arabic one with only a "/" between them can visually reorder at that
-// boundary in a bidi-aware renderer (terminal, WhatsApp) without explicit
-// Unicode directional isolates — the source text stays byte-correct, but a
-// Latin word next to the join can render scrambled. RLI...PDI isolates the
-// Arabic run so it can't leak into its neighbour. System labels are plain
-// French now (LABELS below), so this is only needed for village names.
+// Village names are shown in one script, French/Latin where OSM has it and
+// Arabic otherwise — see lib/place-name.ts, which also handles the bidi
+// isolation the Arabic fallback needs. biText stays for callers that really do
+// want a "Latin/Arabic" pair; village lines no longer do.
 const RLI = '⁧', PDI = '⁩';
 export function biText(fr: string, ar: string | null | undefined) {
   return ar ? `${fr}/${RLI}${ar}${PDI}` : fr;
@@ -506,7 +503,7 @@ export function telegramText(event: FireEvent, referenceTime = new Date(), proxi
     ? shown.map(({ village: v, isProximity }) => {
       const label = isProximity ? LABELS.proximity : LABELS.downwind;
       const eta = !isProximity && v.etaHours !== undefined ? ` ~${etaBucket(v.etaHours)}` : '';
-      return `⚠️ ${biText(v.name, v.name_ar)} ${v.distanceKm.toFixed(1)}km ${label}${eta}`;
+      return `⚠️ ${isolatedDisplayName(v)} ${v.distanceKm.toFixed(1)}km ${label}${eta}`;
     }).join('\n')
     : LABELS.noVillage;
 

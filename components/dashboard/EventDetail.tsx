@@ -15,6 +15,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import { blowsTowardDeg, cardinalFr } from '@/lib/wind';
+import { displayName } from '@/lib/place-name';
 import { formatAge, formatDetectedAgo, wilayaLabel } from './format';
 import type { DashboardEvent } from './types';
 
@@ -101,7 +102,7 @@ export default function EventDetail({ event, onBack }: { event: DashboardEvent; 
         {hasWind ? (
           <p className="text-xs text-[#e4d9b8]">
             Le vent souffle vers le {towardCardinal} à {event.windKph} km/h : le feu pourrait donc se propager vers
-            {downwind.length ? ` ces villages sous le vent : ${downwind.map(d => d.village.name).join(', ')}.` : ' les villages sous le vent, mais aucun n\'est recensé dans un rayon de 20 km.'}
+            {downwind.length ? ` ces villages sous le vent : ${downwind.map(d => displayName(d.village)).join(', ')}.` : ' les villages sous le vent, mais aucun n\'est recensé dans un rayon de 20 km.'}
           </p>
         ) : (
           <p className="text-xs text-[#e4d9b8]">Direction du vent non disponible pour cet événement — propagation probable non estimée.</p>
@@ -114,14 +115,14 @@ export default function EventDetail({ event, onBack }: { event: DashboardEvent; 
         <div>
           <p className="mb-1 text-xs font-semibold text-[#8da79d]">À proximité immédiate (&lt;3km)</p>
           {proximity.length
-            ? proximity.map(({ village }) => <p key={village.osm_id} className="text-xs">⚠️ {village.name} — {village.distanceKm.toFixed(1)}km</p>)
+            ? proximity.map(({ village }) => <p key={village.osm_id} className="text-xs">⚠️ {displayName(village)} — {village.distanceKm.toFixed(1)}km</p>)
             : <p className="text-xs text-[#8da79d]">Aucun village à moins de 3km.</p>}
         </div>
         <div>
           <p className="mb-1 text-xs font-semibold text-[#8da79d]">Sous le vent</p>
           {downwind.length
             ? downwind.map(({ village }) => (
-              <p key={village.osm_id} className="text-xs">⚠️ {village.name} — {village.distanceKm.toFixed(1)}km{village.etaHours !== undefined ? ` · estimation ~${village.etaHours < 1 ? '<1h' : village.etaHours <= 3 ? '1-3h' : '>3h'}` : ''}</p>
+              <p key={village.osm_id} className="text-xs">⚠️ {displayName(village)} — {village.distanceKm.toFixed(1)}km{village.etaHours !== undefined ? ` · estimation ~${village.etaHours < 1 ? '<1h' : village.etaHours <= 3 ? '1-3h' : '>3h'}` : ''}</p>
             ))
             : <p className="text-xs text-[#8da79d]">Aucun village sous le vent recensé.</p>}
         </div>

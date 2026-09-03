@@ -25,6 +25,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { bearingDeg } from '../lib/geo';
+import { displayName } from '../lib/place-name';
+import { preferIpv4 } from '../lib/prefer-ipv4';
 // Type-only: erased at compile time, so it does not load lib/fire-monitor (and
 // with it lib/database) before ALGERIE_FEUX_DB_PATH is set below.
 import type { FireEvent } from '../lib/fire-monitor';
@@ -39,6 +41,7 @@ function loadEnvLocal() {
   }
 }
 loadEnvLocal();
+preferIpv4();
 
 const FOCUS_WILAYAS = ['Jijel', 'Béjaïa', 'Tizi Ouzou'];
 const OUT_OF_BOUNDS = 'Hors frontières / en mer';
@@ -92,8 +95,8 @@ type EventOut = {
   passes: PassRecord[]; passCount: number; maxPixelsInSinglePass: number;
   maxFrpMw: number; maxConfidence: string; score: number; status: FireEvent['status'];
   villagesEvaluated: boolean;
-  nearbyVillages: { name: string; nameAr: string | null; wilaya: string; distanceKm: number }[];
-  downwindVillages: { name: string; nameAr: string | null; wilaya: string; distanceKm: number; bearingFromFireDeg: number; bearingFromFireCardinal: string; relation: string }[];
+  nearbyVillages: { name: string; rawName?: string; nameAr: string | null; wilaya: string; distanceKm: number }[];
+  downwindVillages: { name: string; rawName?: string; nameAr: string | null; wilaya: string; distanceKm: number; bearingFromFireDeg: number; bearingFromFireCardinal: string; relation: string }[];
   windUsed: { api: string; hourUtc: string; speedKph: number; directionFromDeg: number; directionFromCardinal: string; blowsTowardCardinal: string } | null;
   landUse: { context: string; siteName?: string };
   wouldHaveAlerted: boolean;
@@ -134,6 +137,30 @@ function windUsed(event: FireEvent) {
 // paths below assign it before anything renders.
 let proximityKm = DEFAULT_PROXIMITY_KM;
 
+// Rewrites ONLY the village names on a rendered message's "⚠️ <name> <d>km"
+// lines, through the current naming rule. Everything else — the FRP, pass
+// count and wind that message was rendered with at its poll — is left byte for
+// byte as it was, because that is the evidence; the names are presentation.
+function renameMessageVillages(dir: string): number {
+  if (!fs.existsSync(dir)) return 0;
+  const index = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'data', 'villages.json'), 'utf8')) as { name: string; name_ar: string | null }[];
+  const byRawName = new Map(index.map(v => [v.name, v] as const));
+  let changed = 0;
+  for (const file of fs.readdirSync(dir).filter(f => f.endsWith('.txt'))) {
+    const full = path.join(dir, file);
+    const before = fs.readFileSync(full, 'utf8');
+    const after = before.replace(/^⚠️ (.+?) (\d+\.\d+)km /gmu, (_match, token: string, distance: string) => {
+      // The old form was biText(name, name_ar): "Latin/<RLI>arabe<PDI>".
+      const raw = token.replace(/[\u2066-\u2069]/gu, '').split('/')[0].trim();
+      const village = byRawName.get(raw) ?? byRawName.get(token.trim());
+      const shown = village ? displayName(village) : displayName({ name: raw, name_ar: null });
+      return `⚠️ ${shown} ${distance}km `;
+    });
+    if (after !== before) { fs.writeFileSync(full, after); changed++; }
+  }
+  return changed;
+}
+
 type RunMeta = { box: string; days: string[]; detectionsPerDay: Record<string, number>; landUseCircuitOpen?: boolean };
 const eventsPath = path.join(outDir, 'events.json');
 const metaPath = path.join(outDir, 'run-meta.json');
@@ -147,7 +174,8 @@ if (renderOnly) {
   const eventsOut = JSON.parse(fs.readFileSync(eventsPath, 'utf8')) as EventOut[];
   const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as RunMeta;
   fs.writeFileSync(path.join(outDir, 'report.md'), renderReport(eventsOut, meta));
-  console.log(`Re-rendered ${outDir}/report.md from ${eventsOut.length} stored event(s).`);
+  const renamed = renameMessageVillages(path.join(outDir, 'messages'));
+  console.log(`Re-rendered ${outDir}/report.md from ${eventsOut.length} stored event(s); renamed villages in ${renamed} message file(s).`);
   process.exit(0);
 }
 
@@ -188,9 +216,9 @@ const eventsOut: EventOut[] = result.events
       // villages are only computed once wind is known (score >= 55 gate), so
       // null here means "not evaluated", not "none nearby".
       villagesEvaluated: event.villages !== undefined,
-      nearbyVillages: all.filter(v => v.distanceKm <= proximityKm).map(v => ({ name: v.name, nameAr: v.name_ar, wilaya: v.wilaya, distanceKm: Number(v.distanceKm.toFixed(2)) })),
+      nearbyVillages: all.filter(v => v.distanceKm <= proximityKm).map(v => ({ name: displayName(v), rawName: v.name, nameAr: v.name_ar, wilaya: v.wilaya, distanceKm: Number(v.distanceKm.toFixed(2)) })),
       downwindVillages: all.filter(v => v.relation !== 'upwind' && v.distanceKm > proximityKm).map(v => ({
-        name: v.name, nameAr: v.name_ar, wilaya: v.wilaya,
+        name: displayName(v), rawName: v.name, nameAr: v.name_ar, wilaya: v.wilaya,
         distanceKm: Number(v.distanceKm.toFixed(2)),
         bearingFromFireDeg: Number(bearingDeg(event.latitude, event.longitude, v.lat, v.lon).toFixed(1)),
         bearingFromFireCardinal: cardinalFr(bearingDeg(event.latitude, event.longitude, v.lat, v.lon)),
@@ -229,10 +257,17 @@ focusAlerts.forEach((x, i) => {
 
 // ---------- b) report.md ----------
 
+// events.json written before the French/Latin naming rule existed stores the
+// raw OSM name; resolving it here means --render-only fixes an old report
+// instead of requiring a full re-fetch.
+function shownName(v: { name: string; rawName?: string; nameAr: string | null }): string {
+  return displayName({ name: v.rawName ?? v.name, name_ar: v.nameAr });
+}
+
 function nearestVillage(e: EventOut): string {
   if (!e.villagesEvaluated) return '—';
   const all = [...e.nearbyVillages, ...e.downwindVillages].sort((a, b) => a.distanceKm - b.distanceKm);
-  return all.length ? `${all[0].name} (${all[0].distanceKm} km)` : 'aucun < 20 km';
+  return all.length ? `${shownName(all[0])} (${all[0].distanceKm} km)` : 'aucun < 20 km';
 }
 
 function compactRows(evs: EventOut[]): string[] {
@@ -253,8 +288,8 @@ function detailBlock(e: EventOut): string[] {
   if (!e.villagesEvaluated) {
     out.push(`- Villages : **non évalués** (score < 55 : pas d\'enrichissement météo, donc pas de calcul d\'exposition — ce n\'est pas « aucun village »)`);
   } else {
-    out.push(`- Villages à moins de ${proximityKm} km : ${e.nearbyVillages.length ? e.nearbyVillages.map(v => `**${v.name}** (${v.distanceKm} km)`).join(', ') : 'aucun'}`);
-    out.push(`- Villages sous le vent : ${e.downwindVillages.length ? e.downwindVillages.slice(0, 8).map(v => `${v.name} (${v.distanceKm} km, ${v.bearingFromFireCardinal})`).join(', ') : 'aucun'}${e.downwindVillages.length > 8 ? ` … +${e.downwindVillages.length - 8}` : ''}`);
+    out.push(`- Villages à moins de ${proximityKm} km : ${e.nearbyVillages.length ? e.nearbyVillages.map(v => `**${shownName(v)}** (${v.distanceKm} km)`).join(', ') : 'aucun'}`);
+    out.push(`- Villages sous le vent : ${e.downwindVillages.length ? e.downwindVillages.slice(0, 8).map(v => `${shownName(v)} (${v.distanceKm} km, ${v.bearingFromFireCardinal})`).join(', ') : 'aucun'}${e.downwindVillages.length > 8 ? ` … +${e.downwindVillages.length - 8}` : ''}`);
     if (e.windUsed) out.push(`  - Vent utilisé : ${e.windUsed.speedKph} km/h venant du ${e.windUsed.directionFromCardinal} (${e.windUsed.directionFromDeg}°), soufflant vers le ${e.windUsed.blowsTowardCardinal} — archive Open-Meteo à ${e.windUsed.hourUtc}`);
   }
   const lu = e.landUse as { context: string; siteName?: string };

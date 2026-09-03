@@ -21,6 +21,7 @@ import { Settings } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import EventDetail from '@/components/dashboard/EventDetail';
 import { formatDetectedAgo, wilayaLabel } from '@/components/dashboard/format';
+import { displayName } from '@/lib/place-name';
 import type { DashboardEvent, SourceStatus } from '@/components/dashboard/types';
 
 const DashboardMap = dynamic(() => import('@/components/dashboard/Map'), { ssr: false, loading: () => <div className="grid h-full place-items-center text-sm text-[#8da79d]">Chargement de la carte…</div> });
@@ -262,7 +263,7 @@ function EventList({ events, onSelect, emptyMessage }: { events: DashboardEvent[
               </span>
               <span className="text-xs text-[#8da79d]">{ev.detectedAtAlgiers}</span>
             </div>
-            <p className="mt-1 text-xs text-[#8da79d]">FRP {ev.maxFrp.toFixed(1)}MW{top ? ` · près de ${top.name}` : ''}</p>
+            <p className="mt-1 text-xs text-[#8da79d]">FRP {ev.maxFrp.toFixed(1)}MW{top ? ` · près de ${displayName(top)}` : ''}</p>
             <p className="mt-1 text-[11px] text-[#8da79d]">{ev.sourceStatusLine}</p>
             {/* /history measures age from the event's own last pass, so its
                 events carry ageMinutes 0 — the absolute time is always shown,

@@ -21,6 +21,7 @@ import L from 'leaflet';
 import { useEffect, useRef, useState } from 'react';
 import { MapContainer, Marker, Polyline, Popup, TileLayer, Tooltip, useMap, useMapEvents } from 'react-leaflet';
 import { blowsTowardDeg } from '@/lib/wind';
+import { displayName } from '@/lib/place-name';
 import { formatAge, wilayaLabel } from './format';
 import Legend from './Legend';
 import type { DashboardEvent, VillageBase } from './types';
@@ -117,7 +118,7 @@ function ExtraVillages({ selectedEvent }: { selectedEvent: DashboardEvent | null
     <>
       {villages.filter(v => !selectedIds.has(v.osm_id)).map(v => (
         <Marker key={v.osm_id} position={[v.lat, v.lon]} icon={extraVillageIcon()}>
-          <Tooltip direction="top">{v.name}</Tooltip>
+          <Tooltip direction="top">{displayName(v)}</Tooltip>
         </Marker>
       ))}
     </>
@@ -129,7 +130,7 @@ function ExtraVillages({ selectedEvent }: { selectedEvent: DashboardEvent | null
 function FirePopup({ event, onDetail }: { event: DashboardEvent; onDetail: (id: string) => void }) {
   const proximityCount = event.selection.filter(s => s.isProximity).length;
   const downwindCount = event.selection.filter(s => !s.isProximity).length;
-  const nearest = event.selection[0]?.village.name;
+  const nearest = event.selection[0] ? displayName(event.selection[0].village) : undefined;
   const magnitudeShort = event.magnitude.split(',')[0];
   return (
     <div style={{ fontSize: 12, lineHeight: 1.5, minWidth: 180 }}>
@@ -187,10 +188,10 @@ export default function DashboardMap({ events, selectedId, onSelect, onDetail }:
 
       {selectedEvent && selectedEvent.selection.map(({ village, isProximity }) => (
         <Marker key={village.osm_id} position={[village.lat, village.lon]} icon={villageIcon(isProximity)}>
-          <Tooltip direction="top" permanent>{village.name}</Tooltip>
+          <Tooltip direction="top" permanent>{displayName(village)}</Tooltip>
           <Popup>
             <div style={{ fontSize: 12 }}>
-              <strong>{village.name}</strong><br />
+              <strong>{displayName(village)}</strong><br />
               {village.distanceKm.toFixed(1)}km · {isProximity ? 'à proximité' : 'sous le vent'}
             </div>
           </Popup>

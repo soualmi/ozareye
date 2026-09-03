@@ -41,7 +41,10 @@ if (!raw.elements || raw.elements.length === 0) {
   process.exit(1);
 }
 
-type Village = { osm_id: string; name: string; name_ar: string | null; lat: number; lon: number; place: string; wilaya: string };
+// `name:fr` is carried through so displayName() can prefer an explicit French
+// name over guessing at the Latin part of a mixed-script `name`. The shipped
+// index predates this and has none; it appears on the next regeneration.
+type Village = { osm_id: string; name: string; name_ar: string | null; 'name:fr'?: string | null; lat: number; lon: number; place: string; wilaya: string };
 const out: Village[] = [];
 let droppedOutsideAlgeria = 0;
 const perWilaya: Record<string, number> = {};
@@ -50,7 +53,7 @@ for (const el of raw.elements) {
   if (el.type !== 'node' || !el.tags?.name || !el.tags?.place) continue;
   const wilaya = wilayaAt(el.lat, el.lon);
   if (!wilaya) { droppedOutsideAlgeria++; continue; }
-  out.push({ osm_id: `node/${el.id}`, name: el.tags.name, name_ar: el.tags['name:ar'] ?? null, lat: el.lat, lon: el.lon, place: el.tags.place, wilaya });
+  out.push({ osm_id: `node/${el.id}`, name: el.tags.name, name_ar: el.tags['name:ar'] ?? null, 'name:fr': el.tags['name:fr'] ?? null, lat: el.lat, lon: el.lon, place: el.tags.place, wilaya });
   perWilaya[wilaya] = (perWilaya[wilaya] ?? 0) + 1;
 }
 

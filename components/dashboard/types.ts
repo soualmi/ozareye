@@ -15,7 +15,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 // Mirrors the JSON shapes returned by /api/dashboard/events, /history, /villages.
-export type VillageBase = { osm_id: string; name: string; name_ar: string | null; lat: number; lon: number; place: string; wilaya: string };
+export type VillageBase = { osm_id: string; name: string; name_ar: string | null; 'name:fr'?: string | null; lat: number; lon: number; place: string; wilaya: string };
 
 export type VillageExposure = VillageBase & { distanceKm: number; relation: 'downwind' | 'marginal' | 'upwind'; etaHours?: number };
 
