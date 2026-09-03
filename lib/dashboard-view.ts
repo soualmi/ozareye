@@ -24,6 +24,7 @@ import {
   type FireEvent,
 } from './fire-monitor';
 import { satelliteName } from './satellite-names';
+import { withDisplayName } from './place-name';
 
 // frpThresholdMw/proximityKm default to the engine's own defaults but should
 // normally be passed in from the current config (see /api/dashboard/events
@@ -59,7 +60,7 @@ export function toDashboardEvent(event: FireEvent, referenceTime: Date = new Dat
     magnitude: magnitudeLabel(event.maxFrp, event.maxPixelsInSinglePass, frpThresholdMw),
     passes: distinctPasses(event).map(p => ({ ...p, satellite: satelliteName(p.satellite), acquiredAtAlgiers: algiersTime(p.acquiredAt) })),
     evidenceShort: event.evidenceShort,
-    selection: selectExposedVillages(event, proximityKm),
+    selection: selectExposedVillages(event, proximityKm).map(s => ({ ...s, village: withDisplayName(s.village) })),
     disclaimer: LABELS.disclaimer,
     landUseContext: event.landUse?.context,
     landUseSiteName: event.landUse?.siteName,

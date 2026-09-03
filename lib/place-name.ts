@@ -103,3 +103,11 @@ export function isolatedDisplayName(place: NamedPlace): string {
   const shown = displayName(place);
   return ARABIC.test(shown) ? `${RLI}${shown}${PDI}` : shown;
 }
+
+// Applied to anything leaving the API: the wire format carries the resolved
+// display name, so a client, a cached response or any other consumer of
+// /api/dashboard/* never sees Tifinagh at all — not just the pixels we happen
+// to render ourselves. name_ar is kept (some callers show it) but stripped.
+export function withDisplayName<T extends NamedPlace>(place: T): T {
+  return { ...place, name: displayName(place), name_ar: place.name_ar ? stripTifinagh(place.name_ar) : place.name_ar };
+}

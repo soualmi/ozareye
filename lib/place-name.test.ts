@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import fs from 'node:fs';
 import path from 'node:path';
-import { displayName, stripTifinagh } from './place-name';
+import { displayName, stripTifinagh, withDisplayName } from './place-name';
 
 const TIFINAGH = /[ⴰ-⵿]/u;
 
@@ -67,4 +67,11 @@ test('resolves to a non-empty name for essentially every shipped village', () =>
   // A name that is Tifinagh and nothing else has no readable form to fall back
   // to; that must stay rare enough to notice if it grows.
   assert.ok(empty.length < villages.length * 0.01, `${empty.length}/${villages.length} villages resolve to an empty name`);
+});
+
+test('withDisplayName sanitises what leaves the API, name_ar included', () => {
+  const out = withDisplayName({ name: 'Relizane ⴴⵉⵍⵉⵣⴰⵏ غليزان', name_ar: 'غليزان ⵖⵉⵍⵉⵣⴰⵏ', osm_id: 'node/1' } as never) as { name: string; name_ar: string | null };
+  assert.equal(out.name, 'Relizane');
+  assert.ok(!TIFINAGH.test(out.name_ar ?? ''), 'name_ar must not carry Tifinagh onto the wire either');
+  assert.equal(out.name_ar, 'غليزان');
 });

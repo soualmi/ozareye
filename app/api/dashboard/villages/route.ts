@@ -16,6 +16,7 @@
 
 import { isAuthenticated } from '@/lib/dashboard-auth';
 import { villagesInBounds } from '@/lib/fire-monitor';
+import { withDisplayName } from '@/lib/place-name';
 
 // Never ships the full ~9,635-village index — only what's in the current
 // viewport, and only called by the map past its zoom threshold.
@@ -27,5 +28,5 @@ export async function GET(request: Request) {
   const [south, west, north, east] = bounds.split(',').map(Number);
   if ([south, west, north, east].some(n => !Number.isFinite(n))) return Response.json({ error: 'bounds invalide' }, { status: 400 });
 
-  return Response.json({ villages: villagesInBounds(south, west, north, east) });
+  return Response.json({ villages: villagesInBounds(south, west, north, east).map(withDisplayName) });
 }
