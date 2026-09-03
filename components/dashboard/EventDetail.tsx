@@ -63,7 +63,7 @@ export default function EventDetail({ event, onBack }: { event: DashboardEvent; 
       {/* 2. One paragraph */}
       <p className="mb-4 leading-relaxed text-[#c9dbd3]">
         Anomalie thermique détectée par satellite{wilayaBit}, probablement un feu de végétation (mais peut être un brûlage agricole ou une source industrielle — à vérifier).
-        {' '}Détectée il y a {age} — il s&apos;agit de l&apos;heure de détection par satellite, pas nécessairement du début du feu, qui a pu commencer plus tôt.
+        {' '}{event.ageMinutes > 0 ? `Détectée il y a ${age} — il s'agit de` : 'Il s\u2019agit de'} l&apos;heure de détection par satellite, pas nécessairement du début du feu, qui a pu commencer plus tôt.
         {' '}{capitalize(event.magnitude)}.
       </p>
 
@@ -81,7 +81,7 @@ export default function EventDetail({ event, onBack }: { event: DashboardEvent; 
           <li>Position : {event.latitude.toFixed(4)}, {event.longitude.toFixed(4)} · {wilayaLabel(event.wilaya)}</li>
           <li>Intensité : FRP {event.maxFrp.toFixed(1)} MW ({event.magnitude})</li>
           <li>Dernier passage satellite : {event.detectedAtAlgiers} (Alger)</li>
-          <li>Détecté il y a {formatDetectedAgo(event.ageMinutes)}</li>
+          {event.ageMinutes > 0 && <li>Détecté il y a {formatDetectedAgo(event.ageMinutes)}</li>}
           <li>Satellites : {satelliteNames || '—'}</li>
         </ul>
 

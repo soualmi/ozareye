@@ -264,7 +264,10 @@ function EventList({ events, onSelect, emptyMessage }: { events: DashboardEvent[
             </div>
             <p className="mt-1 text-xs text-[#8da79d]">FRP {ev.maxFrp.toFixed(1)}MW{top ? ` · près de ${top.name}` : ''}</p>
             <p className="mt-1 text-[11px] text-[#8da79d]">{ev.sourceStatusLine}</p>
-            <p className="mt-0.5 text-[11px] text-[#5f7a70]">Dernier passage satellite : {ev.detectedAtAlgiers} · Détecté il y a {formatDetectedAgo(ev.ageMinutes)}</p>
+            {/* /history measures age from the event's own last pass, so its
+                events carry ageMinutes 0 — the absolute time is always shown,
+                the elapsed time only when it is a real one. */}
+            <p className="mt-0.5 text-[11px] text-[#5f7a70]">Dernier passage satellite : {ev.detectedAtAlgiers}{ev.ageMinutes > 0 ? ` · Détecté il y a ${formatDetectedAgo(ev.ageMinutes)}` : ''}</p>
           </button>
         );
       })}
