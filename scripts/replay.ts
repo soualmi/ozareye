@@ -64,8 +64,9 @@ const renderOnly = process.argv.includes('--render-only');
 process.env.ALGERIE_FEUX_DB_PATH = path.resolve(dbPath);
 
 // A replay must start from an empty history, or a re-run would cluster into
-// the previous run's leftovers and quietly change the result.
-for (const suffix of ['', '-wal', '-shm', '-journal']) {
+// the previous run's leftovers and quietly change the result. --render-only
+// reads the stored events instead of replaying, so it must keep the database.
+for (const suffix of renderOnly ? [] : ['', '-wal', '-shm', '-journal']) {
   const f = path.resolve(dbPath) + suffix;
   if (fs.existsSync(f)) fs.rmSync(f);
 }
@@ -73,7 +74,7 @@ fs.mkdirSync(path.dirname(path.resolve(dbPath)), { recursive: true });
 fs.mkdirSync(path.join(outDir, 'messages'), { recursive: true });
 
 const { runReplay, CRON_INTERVAL_MIN } = await import('../lib/replay');
-const { algiersTime, confidenceLabel, distinctPasses, eventWilaya } = await import('../lib/fire-monitor');
+const { algiersTime, confidenceLabel, distinctPasses, eventWilaya, DEFAULT_PROXIMITY_KM } = await import('../lib/fire-monitor');
 const { satelliteName } = await import('../lib/satellite-names');
 const { getConfig } = await import('../lib/database');
 
@@ -129,6 +130,10 @@ function windUsed(event: FireEvent) {
   };
 }
 
+// Set from the region config once the replay database is readable — both
+// paths below assign it before anything renders.
+let proximityKm = DEFAULT_PROXIMITY_KM;
+
 type RunMeta = { box: string; days: string[]; detectionsPerDay: Record<string, number>; landUseCircuitOpen?: boolean };
 const eventsPath = path.join(outDir, 'events.json');
 const metaPath = path.join(outDir, 'run-meta.json');
@@ -138,6 +143,7 @@ const metaPath = path.join(outDir, 'run-meta.json');
 // would re-fetch five days of FIRMS to produce identical events.
 if (renderOnly) {
   if (!fs.existsSync(eventsPath)) { console.error(`--render-only needs an existing ${eventsPath}`); process.exit(1); }
+  proximityKm = (await getConfig()).proximityKm;
   const eventsOut = JSON.parse(fs.readFileSync(eventsPath, 'utf8')) as EventOut[];
   const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as RunMeta;
   fs.writeFileSync(path.join(outDir, 'report.md'), renderReport(eventsOut, meta));
@@ -153,7 +159,7 @@ const result = await runReplay({
 });
 const finished = new Date();
 // After runReplay, which is what creates the schema in the fresh replay DB.
-const proximityKm = (await getConfig()).proximityKm;
+proximityKm = (await getConfig()).proximityKm;
 
 // ---------- a) events.json ----------
 const eventsOut: EventOut[] = result.events
@@ -252,7 +258,7 @@ function detailBlock(e: EventOut): string[] {
     if (e.windUsed) out.push(`  - Vent utilisé : ${e.windUsed.speedKph} km/h venant du ${e.windUsed.directionFromCardinal} (${e.windUsed.directionFromDeg}°), soufflant vers le ${e.windUsed.blowsTowardCardinal} — archive Open-Meteo à ${e.windUsed.hourUtc}`);
   }
   const lu = e.landUse as { context: string; siteName?: string };
-  out.push(`- Occupation du sol : ${lu.context === 'unknown' ? 'non déterminée (Overpass injoignable pendant le rejeu)' : lu.context}${lu.siteName ? ` — ${lu.siteName}` : ''}`);
+  out.push(`- Occupation du sol : ${lu.context === 'unknown' || lu.context === 'not-evaluated' ? 'non déterminée — Overpass injoignable pendant le rejeu (voir run-notes.md)' : lu.context}${lu.siteName ? ` — ${lu.siteName}` : ''}`);
   out.push('');
   return out;
 }
