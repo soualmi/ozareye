@@ -74,7 +74,8 @@ test('lookupLandUse: does not cache a failed lookup — the next call retries Ov
   global.fetch = (async () => { calls++; throw new Error('network error'); }) as typeof fetch;
   await lookupLandUse(36.86, 6.44);
   await lookupLandUse(36.86, 6.44);
-  assert.equal(calls, 2, 'a failed lookup must not stick — the next poll should retry');
+  // Two lookups, each trying the primary then the mirror before giving up.
+  assert.equal(calls, 4, 'a failed lookup must not stick — the next poll should retry both endpoints');
 });
 
 function det(overrides: Partial<Detection>): Detection {
@@ -124,4 +125,48 @@ test('industrialContextLine: omits the parenthetical when no OSM name is availab
 test('industrialContextLine: an Arabic-only OSM site name is bidi-isolated, same hazard biText() guards against for village names', () => {
   const line = industrialContextLine('المنطقة الصناعية - لبلارة');
   assert.match(line, /\(⁧المنطقة الصناعية - لبلارة⁩\)/, 'Arabic run must be wrapped in RLI...PDI isolates so it cannot reorder the surrounding French sentence');
+});
+
+test('lookupLandUse: a connection-level failure on the primary retries once on the mirror', async () => {
+  const tried: string[] = [];
+  global.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    tried.push(new URL(url).host);
+    if (url.includes('overpass-api.de')) throw new TypeError('fetch failed');
+    return overpassResponse([{ tags: { power: 'plant', name: 'Centrale électrique du Hamma' } }]);
+  }) as typeof fetch;
+
+  const info = await lookupLandUse(36.75, 3.08);
+  assert.deepEqual(tried, ['overpass-api.de', 'overpass.kumi.systems'], 'primary first, then the mirror — exactly once each');
+  assert.equal(info.context, 'industrial');
+  assert.equal(info.siteName, 'Centrale électrique du Hamma');
+});
+
+test('lookupLandUse: a 429 or 5xx on the primary also falls through to the mirror', async () => {
+  for (const status of [429, 503]) {
+    _clearCacheForTests();
+    const tried: string[] = [];
+    global.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      tried.push(new URL(url).host);
+      if (url.includes('overpass-api.de')) return new Response('slow down', { status });
+      return overpassResponse([{ tags: { landuse: 'quarry' } }]);
+    }) as typeof fetch;
+
+    const info = await lookupLandUse(36.1, 5.2);
+    assert.deepEqual(tried, ['overpass-api.de', 'overpass.kumi.systems'], `status ${status} must be retried on the mirror`);
+    assert.equal(info.context, 'industrial');
+  }
+});
+
+test('lookupLandUse: both endpoints down still fails soft, and never queries a third time', async () => {
+  const tried: string[] = [];
+  global.fetch = (async (input: RequestInfo | URL) => {
+    tried.push(new URL(String(input)).host);
+    throw new TypeError('fetch failed');
+  }) as typeof fetch;
+
+  const info = await lookupLandUse(35.0, 5.0);
+  assert.equal(info.context, 'unknown');
+  assert.equal(tried.length, 2, 'one attempt per endpoint, no more');
 });

@@ -29,11 +29,22 @@
 // 'unknown' and the event proceeds exactly as it did before this feature
 // existed — never blocked, never dropped.
 import { gridCell } from './fire-monitor';
+import { preferIpv4 } from './prefer-ipv4';
 import type { LandUseContext, LandUseInfo } from './fire-monitor';
 
 export type { LandUseContext, LandUseInfo };
 
 const RADIUS_M = 1000;
+
+// Primary, then one mirror. The public instance is the right default (it is
+// the one whose fair-use policy this query is sized against), but it goes down
+// or rate limits often enough that a single failure should not blank out every
+// land-use lookup for the whole run — a 2026-09 replay lost all 675 events'
+// context to one unreachable host. Tried strictly in order, at most one retry.
+const OVERPASS_ENDPOINTS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+];
 
 // Tags that mark a probable non-wildfire, permanent heat-producing or
 // non-vegetation site. Not exhaustive — this is a coarse first-detection
@@ -65,28 +76,39 @@ type OverpassElement = { tags?: Record<string, string> };
 type OverpassResponse = { elements?: OverpassElement[] };
 
 export async function lookupLandUse(lat: number, lon: number): Promise<LandUseInfo> {
+  preferIpv4();
   const cell = gridCell(lat, lon);
   const cached = cache.get(cell);
   if (cached) return cached;
 
-  try {
-    const response = await fetch('https://overpass-api.de/api/interpreter', {
-      method: 'POST',
-      headers: { 'content-type': 'text/plain', 'User-Agent': 'OzarEye/1.0' },
-      body: overpassQuery(lat, lon),
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const data = await response.json() as OverpassResponse;
-    const elements = data.elements ?? [];
-    const named = elements.find(e => e.tags?.name);
-    const info: LandUseInfo = elements.length ? { context: 'industrial', siteName: named?.tags?.name } : { context: 'natural' };
-    cache.set(cell, info);
-    return info;
-  } catch (error) {
-    console.log(`land-use lookup FAILED for cell ${cell}: ${error instanceof Error ? error.message : error}`);
-    return { context: 'unknown' };
+  let lastError: unknown;
+  for (const endpoint of OVERPASS_ENDPOINTS) {
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'content-type': 'text/plain', 'User-Agent': 'OzarEye/1.0' },
+        body: overpassQuery(lat, lon),
+        signal: AbortSignal.timeout(10_000),
+      });
+      // 429 and 5xx are the endpoint's problem, not the query's — worth asking
+      // the mirror. A 4xx other than 429 would fail identically there, so it
+      // ends the attempt rather than doubling the load.
+      if (response.status === 429 || response.status >= 500) throw new Error(`HTTP ${response.status}`);
+      if (!response.ok) { lastError = new Error(`HTTP ${response.status}`); break; }
+      const data = await response.json() as OverpassResponse;
+      const elements = data.elements ?? [];
+      const named = elements.find(e => e.tags?.name);
+      const info: LandUseInfo = elements.length ? { context: 'industrial', siteName: named?.tags?.name } : { context: 'natural' };
+      cache.set(cell, info);
+      return info;
+    } catch (error) {
+      lastError = error;
+      const isLast = endpoint === OVERPASS_ENDPOINTS[OVERPASS_ENDPOINTS.length - 1];
+      console.log(`land-use lookup ${isLast ? 'FAILED' : 'failed, trying mirror'} for cell ${cell} via ${new URL(endpoint).host}: ${error instanceof Error ? error.message : error}`);
+    }
   }
+  if (lastError) console.log(`land-use lookup FAILED for cell ${cell}: ${lastError instanceof Error ? lastError.message : lastError}`);
+  return { context: 'unknown' };
 }
 
 // Test-only: clears the process-lifetime cache between test cases.

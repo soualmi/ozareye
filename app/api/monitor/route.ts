@@ -24,6 +24,12 @@ import { bboxToString } from '@/scripts/build-villages';
 import { chatIdForWilaya } from '@/lib/wilaya-routing';
 import { appendRunLog } from '@/lib/run-log';
 import { recordSourceOutcome } from '@/lib/source-health';
+import { preferIpv4 } from '@/lib/prefer-ipv4';
+
+// Applied once when this route module first loads — the earliest point the
+// server runs our own code — so every outbound lookup in the run below
+// resolves A records first. See lib/prefer-ipv4.ts.
+preferIpv4();
 
 const ESCALATION_SCORE_DELTA = 15;
 const STATUS_RANK: Record<FireEvent['status'], number> = { observation: 0, corroborated: 1, urgent: 2 };
