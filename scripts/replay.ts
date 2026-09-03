@@ -61,6 +61,13 @@ const delayMs = Number(arg('delay', '1200'));
 // Rebuilds report.md from an existing events.json without re-fetching anything
 // — the report layout is the part most likely to need another pass.
 const renderOnly = process.argv.includes('--render-only');
+// Re-evaluates land-use for every stored event against the CURRENT
+// lookupLandUse() (the local index, once data/industrial-sites.json exists)
+// without re-fetching FIRMS or weather — for a replay run that predates the
+// index (Overpass was unreachable at the time, so every event was left
+// 'unknown' or unevaluated). Updates the replay DB, events.json, then
+// re-renders report.md/messages/ exactly like --render-only.
+const reevaluateLandUse = process.argv.includes('--reevaluate-landuse');
 
 // Must be set before lib/database resolves its backend — hence the dynamic
 // imports below rather than top-level ones.
@@ -68,8 +75,9 @@ process.env.ALGERIE_FEUX_DB_PATH = path.resolve(dbPath);
 
 // A replay must start from an empty history, or a re-run would cluster into
 // the previous run's leftovers and quietly change the result. --render-only
-// reads the stored events instead of replaying, so it must keep the database.
-for (const suffix of renderOnly ? [] : ['', '-wal', '-shm', '-journal']) {
+// and --reevaluate-landuse both read/update the stored events instead of
+// replaying, so they must keep the database.
+for (const suffix of (renderOnly || reevaluateLandUse) ? [] : ['', '-wal', '-shm', '-journal']) {
   const f = path.resolve(dbPath) + suffix;
   if (fs.existsSync(f)) fs.rmSync(f);
 }
@@ -77,9 +85,9 @@ fs.mkdirSync(path.dirname(path.resolve(dbPath)), { recursive: true });
 fs.mkdirSync(path.join(outDir, 'messages'), { recursive: true });
 
 const { runReplay, CRON_INTERVAL_MIN } = await import('../lib/replay');
-const { algiersTime, confidenceLabel, distinctPasses, eventWilaya, DEFAULT_PROXIMITY_KM } = await import('../lib/fire-monitor');
+const { algiersTime, confidenceLabel, distinctPasses, eventWilaya, lowerStatus, DEFAULT_PROXIMITY_KM } = await import('../lib/fire-monitor');
 const { satelliteName } = await import('../lib/satellite-names');
-const { getConfig } = await import('../lib/database');
+const { getConfig, eventsBetween, saveSignal } = await import('../lib/database');
 
 const mapKey = process.env.FIRMS_MAP_KEY;
 if (!mapKey) {
@@ -161,7 +169,14 @@ function renameMessageVillages(dir: string): number {
   return changed;
 }
 
-type RunMeta = { box: string; days: string[]; detectionsPerDay: Record<string, number>; landUseCircuitOpen?: boolean };
+type RunMeta = {
+  box: string; days: string[]; detectionsPerDay: Record<string, number>; landUseCircuitOpen?: boolean;
+  /** Set once --reevaluate-landuse has re-scored every event with the local
+   *  index — flips the report's caveat from "Overpass was unreachable" to
+   *  "measured with the local index" (the 30-day persistent-source guard
+   *  caveat is unaffected and always stays). */
+  landUseReevaluatedWithLocalIndex?: boolean;
+};
 const eventsPath = path.join(outDir, 'events.json');
 const metaPath = path.join(outDir, 'run-meta.json');
 
@@ -176,6 +191,63 @@ if (renderOnly) {
   fs.writeFileSync(path.join(outDir, 'report.md'), renderReport(eventsOut, meta));
   const renamed = renameMessageVillages(path.join(outDir, 'messages'));
   console.log(`Re-rendered ${outDir}/report.md from ${eventsOut.length} stored event(s); renamed villages in ${renamed} message file(s).`);
+  process.exit(0);
+}
+
+// --reevaluate-landuse: the original run at this dbPath predates
+// data/industrial-sites.json (Overpass was unreachable, so every event was
+// left 'unknown' or unevaluated). Re-scores every stored event with the
+// CURRENT lookupLandUse() — the local index, no network — updates the
+// replay DB and events.json, then re-renders exactly like --render-only.
+// No FIRMS or weather calls: detections/passes/wind are untouched.
+if (reevaluateLandUse) {
+  if (!fs.existsSync(eventsPath)) { console.error(`--reevaluate-landuse needs an existing ${eventsPath}`); process.exit(1); }
+  const { lookupLandUse } = await import('../lib/landuse');
+  proximityKm = (await getConfig()).proximityKm;
+
+  const eventsOut = JSON.parse(fs.readFileSync(eventsPath, 'utf8')) as EventOut[];
+  const stored = await eventsBetween('2000-01-01T00:00:00.000Z', '2100-01-01T00:00:00.000Z', 100_000);
+  const storedById = new Map(stored.map(e => [e.id, e] as const));
+
+  let industrial = 0, natural = 0, unknown = 0;
+  for (const out of eventsOut) {
+    const landUse = await lookupLandUse(out.latitude, out.longitude);
+    out.landUse = landUse;
+    const full = storedById.get(out.id);
+    if (full) {
+      const updated = landUse.context === 'industrial'
+        ? { ...full, landUse, status: lowerStatus(full.status) }
+        : { ...full, landUse };
+      await saveSignal(updated);
+      out.status = updated.status;
+    }
+    if (landUse.context === 'industrial') industrial++;
+    else if (landUse.context === 'natural') natural++;
+    else unknown++;
+  }
+
+  fs.writeFileSync(eventsPath, JSON.stringify(eventsOut, null, 2) + '\n');
+  const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as RunMeta;
+  meta.landUseReevaluatedWithLocalIndex = true;
+  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2) + '\n');
+
+  fs.writeFileSync(path.join(outDir, 'report.md'), renderReport(eventsOut, meta));
+  const renamed = renameMessageVillages(path.join(outDir, 'messages'));
+
+  const notesPath = path.join(outDir, 'run-notes.md');
+  if (fs.existsSync(notesPath)) {
+    fs.appendFileSync(notesPath, [
+      '',
+      `## Occupation du sol — réévaluation post-hoc (${new Date().toISOString()})`,
+      '',
+      `Overpass était injoignable pendant le rejeu original (voir plus haut). Réévalué depuis avec l'index local (\`data/industrial-sites.json\`, construit une fois par \`scripts/build-industrial-index.ts\`, sans appel réseau) : **${industrial} événement(s) industriel(s)**, ${natural} naturel(s), ${unknown} encore indéterminé(s) sur ${eventsOut.length}.`,
+      `Le garde-fou « source permanente sur 30 jours » (point 5 plus haut) reste non appliqué : cette réévaluation ne change que le marquage par site industriel connu, pas les autres filtres.`,
+      '',
+    ].join('\n'));
+  }
+
+  console.log(`Re-evaluated land-use for ${eventsOut.length} event(s) with the local index: ${industrial} industrial, ${natural} natural, ${unknown} unknown.`);
+  console.log(`Re-rendered ${outDir}/report.md; renamed villages in ${renamed} message file(s).`);
   process.exit(0);
 }
 
@@ -278,7 +350,7 @@ function compactRows(evs: EventOut[]): string[] {
   return rows;
 }
 
-function detailBlock(e: EventOut): string[] {
+function detailBlock(e: EventOut, landUseReevaluated: boolean): string[] {
   const out: string[] = [];
   out.push(`#### ${e.id}`, '');
   out.push(`- **Première détection** : ${e.firstDetectionAlgiers} (Alger) — ${e.firstDetectionUtc}`);
@@ -293,7 +365,11 @@ function detailBlock(e: EventOut): string[] {
     if (e.windUsed) out.push(`  - Vent utilisé : ${e.windUsed.speedKph} km/h venant du ${e.windUsed.directionFromCardinal} (${e.windUsed.directionFromDeg}°), soufflant vers le ${e.windUsed.blowsTowardCardinal} — archive Open-Meteo à ${e.windUsed.hourUtc}`);
   }
   const lu = e.landUse as { context: string; siteName?: string };
-  out.push(`- Occupation du sol : ${lu.context === 'unknown' || lu.context === 'not-evaluated' ? 'non déterminée — Overpass injoignable pendant le rejeu (voir run-notes.md)' : lu.context}${lu.siteName ? ` — ${lu.siteName}` : ''}`);
+  const notDetermined = lu.context === 'unknown' || lu.context === 'not-evaluated';
+  const landUseLabel = notDetermined
+    ? (landUseReevaluated ? 'non déterminée (aucun site connu dans l\'index local à proximité)' : 'non déterminée — Overpass injoignable pendant le rejeu (voir run-notes.md)')
+    : lu.context;
+  out.push(`- Occupation du sol : ${landUseLabel}${lu.siteName ? ` — ${lu.siteName}` : ''}`);
   out.push('');
   return out;
 }
@@ -314,7 +390,16 @@ function renderReport(eventsOut: EventOut[], meta: RunMeta): string {
   lines.push(`# Replay OzarEye — incendies du 26 août 2026 (Kabylie / Est algérien)`, '');
   lines.push(`Rejeu à sec du moteur réel (mêmes modules que la production) sur les archives NASA FIRMS du **${from} au ${to}**, jour par jour dans l\'ordre chronologique.`, '');
   lines.push(`> **Aucun message n\'a été envoyé.** Les textes Telegram reproduits dans \`messages/\` sont des rendus hors ligne, jamais transmis. Le rejeu écrit dans sa propre base (\`${dbPath}\`) et n\'ouvre jamais la base de production.`, '');
-  lines.push(`> **Ce que ce rejeu ne prouve pas.** Le garde-fou « source permanente sur 30 jours » n\'a pas d\'historique ici et n\'a donc rien filtré${meta.landUseCircuitOpen ? ' ; Overpass (occupation du sol) était injoignable pendant le run, donc aucun site industriel n\'a pu être identifié' : ''}. ${meta.landUseCircuitOpen ? 'Ces deux filtres auraient' : 'Ce filtre aurait'} réduit le nombre d\'alertes en conditions réelles. La latence de publication des flux NRT (1 à 3 h) n\'est pas modélisée : les heures ci-dessous sont un plancher optimiste. Voir \`run-notes.md\`.`, '');
+  const landUseCaveat = meta.landUseReevaluatedWithLocalIndex
+    ? '' // measured post-hoc with the local index (data/industrial-sites.json) — see run-notes.md
+    : (meta.landUseCircuitOpen ? ' ; Overpass (occupation du sol) était injoignable pendant le run, donc aucun site industriel n\'a pu être identifié' : '');
+  const guardsClause = meta.landUseReevaluatedWithLocalIndex
+    ? 'Ce filtre aurait'
+    : (meta.landUseCircuitOpen ? 'Ces deux filtres auraient' : 'Ce filtre aurait');
+  lines.push(`> **Ce que ce rejeu ne prouve pas.** Le garde-fou « source permanente sur 30 jours » n\'a pas d\'historique ici et n\'a donc rien filtré${landUseCaveat}. ${guardsClause} réduit le nombre d\'alertes en conditions réelles. La latence de publication des flux NRT (1 à 3 h) n\'est pas modélisée : les heures ci-dessous sont un plancher optimiste. Voir \`run-notes.md\`.`, '');
+  if (meta.landUseReevaluatedWithLocalIndex) {
+    lines.push('> **Occupation du sol : réévaluée après coup.** Overpass était injoignable pendant le rejeu original ; la colonne « tag industriel » ci-dessous a été recalculée depuis avec l\'index local (`data/industrial-sites.json`, aucun appel réseau) — voir `run-notes.md`. Le garde-fou « source permanente sur 30 jours », lui, reste non appliqué.', '');
+  }
   lines.push('## Chiffres', '');
   lines.push(`| | |`, `|---|---:|`);
   lines.push(`| Détections brutes FIRMS | ${Object.values(meta.detectionsPerDay).reduce((a, b) => a + b, 0)} |`);
@@ -333,7 +418,7 @@ function renderReport(eventsOut: EventOut[], meta: RunMeta): string {
     lines.push(...compactRows(evs), '');
     if (focus) {
       lines.push(`### Détail — les ${Math.min(8, evs.length)} plus intenses`, '');
-      for (const e of evs.slice(0, 8)) lines.push(...detailBlock(e));
+      for (const e of evs.slice(0, 8)) lines.push(...detailBlock(e, Boolean(meta.landUseReevaluatedWithLocalIndex)));
     }
   }
 
@@ -346,7 +431,9 @@ function renderReport(eventsOut: EventOut[], meta: RunMeta): string {
   }
   lines.push(`| **Total** | **${eventsOut.length}** | **${eventsOut.filter(e => e.passCount >= 2).length}** | **${eventsOut.filter(e => (e.landUse as { context: string }).context === 'industrial').length}** | **${eventsOut.filter(e => e.wilaya === null).length}** |`);
   lines.push('');
-  lines.push(`_Colonne « tag industriel » à 0 par indisponibilité d\'Overpass pendant ce rejeu, pas par absence de sites industriels — voir run-notes.md._`, '');
+  lines.push(meta.landUseReevaluatedWithLocalIndex
+    ? `_Colonne « tag industriel » recalculée après coup avec l\'index local (data/industrial-sites.json), sans appel réseau — voir run-notes.md._`
+    : `_Colonne « tag industriel » à 0 par indisponibilité d\'Overpass pendant ce rejeu, pas par absence de sites industriels — voir run-notes.md._`, '');
   return lines.join('\n');
 }
 

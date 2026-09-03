@@ -62,6 +62,7 @@ type EventOut = {
   nearbyVillages: { name: string; rawName?: string; nameAr: string | null; distanceKm: number; relation?: string }[];
   downwindVillages: { name: string; rawName?: string; nameAr: string | null; distanceKm: number; relation?: string }[];
   wouldHaveAlerted: boolean;
+  landUse: { context: string; siteName?: string };
 };
 
 const eventsOut = JSON.parse(fs.readFileSync(path.join(outDir, 'events.json'), 'utf8')) as EventOut[];
@@ -213,6 +214,18 @@ const pressCoverage = PRESS_VILLAGES.map(press => {
 });
 const pressFound = pressCoverage.filter(p => p.found).length;
 
+// --- industrial-site overlap (needs land-use reevaluated with the local index,
+//     `npm run replay -- --db ... --out ... --reevaluate-landuse`) ----------
+const eventsById = new Map(eventsOut.map(e => [e.id, e] as const));
+const isIndustrial = (e: EventOut) => e.landUse?.context === 'industrial';
+const industrialAlerted = alertedIds.filter(id => isIndustrial(eventsById.get(id)!));
+const industrialShare = Number((industrialAlerted.length / Math.max(alertedIds.length, 1)).toFixed(3));
+const industrialByWilaya = Object.fromEntries(FOCUS.map(w => {
+  const inWilaya = alertedIds.filter(id => eventsById.get(id)!.wilaya === w);
+  const industrialInWilaya = inWilaya.filter(id => isIndustrial(eventsById.get(id)!));
+  return [w, { alerted: inWilaya.length, industrial: industrialInWilaya.length, share: Number((industrialInWilaya.length / Math.max(inWilaya.length, 1)).toFixed(3)) }];
+}));
+
 // --- 4. geographic precision -------------------------------------------------
 function quantile(values: number[], q: number): number | null {
   if (!values.length) return null;
@@ -251,6 +264,7 @@ const metrics = {
   earlyWeakSignal: { count: earlyWeak.length, top10: earlyWeak.slice(0, 10) },
   bigOnFirstSight: { count: firstSightBig.length, top10: firstSightBig.slice(0, 10) },
   nightAlerts: { count: nightIds.length, share: Number((nightIds.length / Math.max(alertedIds.length, 1)).toFixed(3)) },
+  industrialSites: { count: industrialAlerted.length, total: alertedIds.length, share: industrialShare, byWilaya: industrialByWilaya },
   pressCoverage: { found: pressFound, total: PRESS_VILLAGES.length, detail: pressCoverage },
   precision,
   aug26FirstAlerts: aug26,
@@ -307,8 +321,13 @@ L.push('Ces heures sont à lire avec deux réserves, dans cet ordre :', '');
 L.push('1. **La Protection civile comptait déjà 4 fronts actifs à Jijel à 14h00 le 26 août.** Une alerte rendue à la même heure ou après n\'aurait rien appris à personne sur place : elle arrive quand les secours sont déjà engagés.');
 L.push('2. **La latence de publication NRT n\'est pas modélisée.** Le rejeu suppose la détection disponible à l\'heure du passage satellite ; les flux VIIRS NRT sortent avec 1 à 3 h de délai. Il faut donc ajouter +1 h à +3 h à chaque heure de ce document avant de la comparer à un événement réel.', '');
 
-L.push('## 6. Ce que ce rejeu ne permet PAS d\'affirmer', '');
-L.push('- **Le taux de fausses alertes n\'est pas mesurable ici.** Overpass était injoignable pendant le rejeu, donc aucun site industriel n\'a été identifié, et le garde-fou « source permanente sur 30 jours » n\'avait pas d\'historique : les deux filtres qui écartent les torchères, cimenteries et autres sources de chaleur permanentes étaient inactifs. Une partie des 490 événements alertés en serait presque certainement écartée en conditions réelles.');
+L.push('## 6. Ce que ce rejeu permet de mesurer désormais — et ce qu\'il ne permet toujours pas', '');
+L.push(`- **Chevauchement avec un site industriel connu : mesurable désormais.** Occupation du sol réévaluée après coup avec l'index local (\`data/industrial-sites.json\`, \`--reevaluate-landuse\`, aucun appel réseau — Overpass était injoignable pendant le rejeu original) : **${industrialAlerted.length} des ${alertedIds.length}** événements alertés (${Math.round(industrialShare * 100)} %) tombent sur un site industriel/énergie connu (usine, centrale, carrière, décharge, torchère, cimenterie...). Le moteur live abaisse leur statut plutôt que de les alerter en \`urgent\` — une partie de ces ${industrialAlerted.length} événements n'aurait donc pas été une alerte rouge en conditions réelles.`, '');
+L.push('| Wilaya | Alertés | Sur site industriel connu | Part |', '|---|---:|---:|---:|');
+for (const w of FOCUS) { const d = industrialByWilaya[w]; L.push(`| ${w} | ${d.alerted} | ${d.industrial} | ${Math.round(d.share * 100)} % |`); }
+L.push('');
+L.push('- **Le garde-fou « source permanente sur 30 jours » reste non mesurable ici**, réévaluation de l\'occupation du sol ou non : il exige plus de 10 jours distincts d\'historique par cellule, qu\'une fenêtre de rejeu de quelques jours ne peut pas produire. Une partie des événements restants (hors site industriel connu) en serait probablement écartée aussi en conditions réelles.');
+L.push('- **Le taux de fausses alertes global reste donc partiellement mesurable, pas entièrement** : le filtre « site industriel connu » ci-dessus est maintenant appliqué rétroactivement ; le second filtre (source permanente) ne l\'est toujours pas, faute d\'historique. Aucun des deux ne constitue une vérification terrain — voir le point suivant.');
 L.push('- **Les feux manqués ne sont pas mesurés**, seulement approchés par les villages cités dans la presse (§3). Un feu qu\'aucun média n\'a nommé et qu\'aucun satellite n\'a vu n\'apparaît nulle part ici.');
 L.push(`- **29 événements hors frontières** (Maroc, Tunisie, Méditerranée, Espagne) sont exclus des comptes par wilaya : l'emprise FIRMS est un rectangle plus large que l'Algérie.`);
 L.push('- **Aucune vérification terrain.** Rien dans ce document ne dit qu\'un feu a réellement eu lieu à l\'endroit indiqué : ce sont des anomalies thermiques satellitaires, corroborées entre elles au mieux.');
