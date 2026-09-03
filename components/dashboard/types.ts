@@ -23,6 +23,9 @@ export type PassInfo = { satellite: string; instrument: string; acquiredAt: stri
 
 export type LandUseContext = 'industrial' | 'natural' | 'unknown';
 
+// Per-source watchdog state, as sent by /api/dashboard/events.
+export type SourceStatus = { source: string; name: string; ok: boolean; lastSuccessAt: string | null; downSince: string | null };
+
 export type DashboardEvent = {
   id: string;
   latitude: number; longitude: number;
@@ -34,6 +37,7 @@ export type DashboardEvent = {
   windKph?: number; windDirectionFromDeg?: number; humidity?: number;
   passCount: number; maxPixelsInSinglePass: number;
   confidenceLabel: string; magnitude: string;
+  sourceStatusLine: string;
   passes: PassInfo[];
   evidenceShort: string[];
   selection: { village: VillageExposure; isProximity: boolean }[];

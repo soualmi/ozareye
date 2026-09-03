@@ -21,18 +21,27 @@ import L from 'leaflet';
 import { useEffect, useRef, useState } from 'react';
 import { MapContainer, Marker, Polyline, Popup, TileLayer, Tooltip, useMap, useMapEvents } from 'react-leaflet';
 import { blowsTowardDeg } from '@/lib/wind';
-import { formatAge } from './format';
+import { formatAge, wilayaLabel } from './format';
 import Legend from './Legend';
 import type { DashboardEvent, VillageBase } from './types';
 
 const VILLAGE_ZOOM_THRESHOLD = 11;
 
-function fireIcon(status: DashboardEvent['status'], frp: number, selected: boolean) {
+function markerLabel(event: DashboardEvent): string {
+  return `Anomalie thermique, ${wilayaLabel(event.wilaya)}, FRP ${event.maxFrp.toFixed(1)} MW, détectée à ${event.detectedAtAlgiers}`;
+}
+
+function escapeHtml(s: string) {
+  return s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
+}
+
+function fireIcon(status: DashboardEvent['status'], frp: number, selected: boolean, label: string) {
   const color = status === 'urgent' ? '#ff5b32' : status === 'corroborated' ? '#f5b942' : '#63dda0';
   const size = Math.min(34, Math.max(14, 10 + Math.sqrt(frp) * 2));
   const ring = selected ? `box-shadow:0 0 0 3px #fff, 0 0 0 5px ${color};` : '';
+  const safe = escapeHtml(label);
   return L.divIcon({
-    className: '', html: `<div style="width:${size}px;height:${size}px;border-radius:50%;background:${color};opacity:.9;${ring}"></div>`,
+    className: '', html: `<div role="img" aria-label="${safe}" title="${safe}" style="width:${size}px;height:${size}px;border-radius:50%;background:${color};opacity:.9;${ring}"></div>`,
     iconSize: [size, size], iconAnchor: [size / 2, size / 2],
   });
 }
@@ -125,9 +134,11 @@ function FirePopup({ event, onDetail }: { event: DashboardEvent; onDetail: (id: 
   return (
     <div style={{ fontSize: 12, lineHeight: 1.5, minWidth: 180 }}>
       <strong>Anomalie thermique — probablement un feu</strong>
-      <div>{[nearest, event.wilaya].filter(Boolean).join(' · ') || 'Localisation inconnue'}</div>
+      <div>{[nearest, wilayaLabel(event.wilaya)].filter(Boolean).join(' · ')}</div>
       <div>{capitalize(magnitudeShort)}</div>
+      <div>Dernier passage satellite : {event.detectedAtAlgiers} (Alger)</div>
       <div>Détectée il y a {formatAge(event.ageMinutes)}</div>
+      <div style={{ marginTop: 4 }}>{event.sourceStatusLine}</div>
       <div>{proximityCount} village(s) à proximité, {downwindCount} sous le vent</div>
       {event.industrialNote && <div style={{ marginTop: 4, color: '#f5b942' }}>🏭 {event.industrialNote}</div>}
       <button
@@ -165,10 +176,11 @@ export default function DashboardMap({ events, selectedId, onSelect, onDetail }:
         <Marker
           key={ev.id}
           position={[ev.latitude, ev.longitude]}
-          icon={fireIcon(ev.status, ev.maxFrp, ev.id === selectedId)}
+          icon={fireIcon(ev.status, ev.maxFrp, ev.id === selectedId, markerLabel(ev))}
           eventHandlers={{ click: () => onSelect(ev.id) }}
+          alt={markerLabel(ev)}
         >
-          <Tooltip direction="top">{ev.wilaya ?? 'Wilaya inconnue'} · FRP {ev.maxFrp.toFixed(1)}MW</Tooltip>
+          <Tooltip direction="top">{wilayaLabel(ev.wilaya)} · FRP {ev.maxFrp.toFixed(1)}MW</Tooltip>
           <Popup><FirePopup event={ev} onDetail={onDetail} /></Popup>
         </Marker>
       ))}

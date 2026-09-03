@@ -15,13 +15,20 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import { blowsTowardDeg, cardinalFr } from '@/lib/wind';
-import { formatAge } from './format';
+import { formatAge, formatDetectedAgo, wilayaLabel } from './format';
 import type { DashboardEvent } from './types';
 
 // Dashboard-only narrative rendering. Every value below comes straight off
 // the DashboardEvent the API already computed from stored fields — nothing
 // here invents a number (no hectare estimate, no definite trajectory).
 // Telegram's telegramText() and the engine are untouched by this file.
+
+// FIRMS' map reads its view out of the URL hash: #d:<window>;@<lon>,<lat>,<zoom>z
+// — longitude first, and the app normalises it in place (…@5.00,36.40,9.00z),
+// which is how this format was verified against the live map before hardcoding.
+function firmsMapUrl(latitude: number, longitude: number, zoom = 10): string {
+  return `https://firms.modaps.eosdis.nasa.gov/map/#d:24hrs;@${longitude.toFixed(2)},${latitude.toFixed(2)},${zoom.toFixed(2)}z`;
+}
 
 function capitalize(s: string) {
   return s.charAt(0).toUpperCase() + s.slice(1);
@@ -48,6 +55,11 @@ export default function EventDetail({ event, onBack }: { event: DashboardEvent; 
         <h2 className="text-base font-semibold">Anomalie thermique — probablement un feu</h2>
       </div>
 
+      {/* Item 2: what the passes actually establish. Repetition proves the
+          heat source persisted, not that it is a vegetation fire, and never
+          that anyone has checked it on the ground. */}
+      <p className="mb-3 rounded-lg border border-white/10 bg-[#07130f] px-3 py-2 text-xs text-[#c9dbd3]">{event.sourceStatusLine}</p>
+
       {/* 2. One paragraph */}
       <p className="mb-4 leading-relaxed text-[#c9dbd3]">
         Anomalie thermique détectée par satellite{wilayaBit}, probablement un feu de végétation (mais peut être un brûlage agricole ou une source industrielle — à vérifier).
@@ -66,11 +78,22 @@ export default function EventDetail({ event, onBack }: { event: DashboardEvent; 
       <div className="mb-3 rounded-xl border border-white/10 bg-[#07130f] p-3">
         <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-[#63dda0]">Constaté</h3>
         <ul className="space-y-1 text-xs text-[#c9dbd3]">
-          <li>Position : {event.latitude.toFixed(4)}, {event.longitude.toFixed(4)}{event.wilaya ? ` · ${event.wilaya}` : ''}</li>
+          <li>Position : {event.latitude.toFixed(4)}, {event.longitude.toFixed(4)} · {wilayaLabel(event.wilaya)}</li>
           <li>Intensité : FRP {event.maxFrp.toFixed(1)} MW ({event.magnitude})</li>
-          <li>Détection : {event.detectedAtAlgiers} (Alger), il y a {age}</li>
+          <li>Dernier passage satellite : {event.detectedAtAlgiers} (Alger)</li>
+          <li>Détecté il y a {formatDetectedAgo(event.ageMinutes)}</li>
           <li>Satellites : {satelliteNames || '—'}</li>
         </ul>
+
+        {/* Item 8: the same point on NASA's own map, for cross-checking. */}
+        <a
+          href={firmsMapUrl(event.latitude, event.longitude)}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="mt-3 flex w-full items-center justify-center rounded-lg border border-white/15 bg-[#0b1d18] px-3 py-2 text-xs font-medium text-[#63dda0] hover:border-[#45d892]/60"
+        >
+          Voir sur NASA FIRMS ↗
+        </a>
       </div>
 
       <div className="mb-4 rounded-xl border border-[#f5b942]/25 bg-[#f5b942]/5 p-3">
@@ -120,7 +143,7 @@ export default function EventDetail({ event, onBack }: { event: DashboardEvent; 
             {hasWind && <li>Vent : {event.windKph} km/h, soufflant depuis le {fromCardinal} vers le {towardCardinal}</li>}
             {event.humidity !== undefined && <li>Humidité relative : {event.humidity}%</li>}
             <li>Coordonnées : {event.latitude.toFixed(5)}, {event.longitude.toFixed(5)}</li>
-            <li>Wilaya : {event.wilaya ?? 'non déterminée'}</li>
+            <li>Wilaya : {wilayaLabel(event.wilaya)}</li>
           </ul>
           <p className="text-[#8da79d]">
             VIIRS (Visible Infrared Imaging Radiometer Suite) est un capteur en orbite polaire, résolution au sol d&apos;environ 375m,

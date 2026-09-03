@@ -21,8 +21,9 @@
     "test:fetch-timeout": "tsx --test lib/fetch-timeout.test.ts",
     "test:landuse": "tsx --test lib/landuse.test.ts",
     "test:live-window": "tsx --test lib/live-window.test.ts",
+    "test:satellite-names": "tsx --test lib/satellite-names.test.ts",
     "test:source-health": "tsx --test lib/source-health.test.ts",
-    "test": "tsx --test lib/wind.test.ts lib/labels.test.ts lib/wilaya.test.ts lib/clustering.test.ts lib/config.test.ts lib/fetch-timeout.test.ts lib/landuse.test.ts lib/live-window.test.ts lib/source-health.test.ts",
+    "test": "tsx --test lib/wind.test.ts lib/labels.test.ts lib/wilaya.test.ts lib/clustering.test.ts lib/config.test.ts lib/fetch-timeout.test.ts lib/landuse.test.ts lib/live-window.test.ts lib/satellite-names.test.ts lib/source-health.test.ts",
     "replay": "tsx scripts/replay.ts"
   },
   "dependencies": {

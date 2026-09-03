@@ -23,6 +23,7 @@ import {
   LABELS, algiersTime, confidenceLabel, distinctPasses, eventWilaya, industrialContextLine, magnitudeLabel, minutesSince, selectExposedVillages,
   type FireEvent,
 } from './fire-monitor';
+import { satelliteName } from './satellite-names';
 
 // frpThresholdMw/proximityKm default to the engine's own defaults but should
 // normally be passed in from the current config (see /api/dashboard/events
@@ -30,6 +31,17 @@ import {
 // which villages are "proximity" vs "downwind") matches the same tunables
 // currently configured, not a value frozen at whatever they were when this
 // function was written.
+// What the satellite evidence actually supports, in words. Repeated passes
+// prove the heat source persisted across overpasses — they do NOT prove a
+// vegetation fire, and nothing here has been checked on the ground, so the
+// line says so explicitly. "Confirmé au sol" is deliberately never emitted:
+// this system has no ground-truth input to justify it.
+export function sourceStatusLine(passCount: number): string {
+  return passCount >= 2
+    ? `Signal thermique répété — corroboré par ${passCount} passages satellites, non confirmé au sol`
+    : 'Passage satellite unique — non confirmé au sol';
+}
+
 export function toDashboardEvent(event: FireEvent, referenceTime: Date = new Date(), frpThresholdMw?: number, proximityKm?: number) {
   const last = event.detections[event.detections.length - 1];
   return {
@@ -37,14 +49,15 @@ export function toDashboardEvent(event: FireEvent, referenceTime: Date = new Dat
     latitude: event.latitude, longitude: event.longitude,
     wilaya: eventWilaya(event),
     status: event.status, score: event.score,
-    maxFrp: event.maxFrp, instrument: last.instrument, satellite: last.satellite,
+    maxFrp: event.maxFrp, instrument: last.instrument, satellite: satelliteName(last.satellite),
     detectedAtIso: event.lastAcquiredAt, detectedAtAlgiers: algiersTime(event.lastAcquiredAt),
     ageMinutes: minutesSince(event.lastAcquiredAt, referenceTime),
     windKph: event.windKph, windDirectionFromDeg: event.windDirectionFromDeg, humidity: event.humidity,
     passCount: event.passCount, maxPixelsInSinglePass: event.maxPixelsInSinglePass,
     confidenceLabel: confidenceLabel(event.maxConfidence),
+    sourceStatusLine: sourceStatusLine(event.passCount),
     magnitude: magnitudeLabel(event.maxFrp, event.maxPixelsInSinglePass, frpThresholdMw),
-    passes: distinctPasses(event).map(p => ({ ...p, acquiredAtAlgiers: algiersTime(p.acquiredAt) })),
+    passes: distinctPasses(event).map(p => ({ ...p, satellite: satelliteName(p.satellite), acquiredAtAlgiers: algiersTime(p.acquiredAt) })),
     evidenceShort: event.evidenceShort,
     selection: selectExposedVillages(event, proximityKm),
     disclaimer: LABELS.disclaimer,
