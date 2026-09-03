@@ -74,8 +74,8 @@ test('lookupLandUse: does not cache a failed lookup — the next call retries Ov
   global.fetch = (async () => { calls++; throw new Error('network error'); }) as typeof fetch;
   await lookupLandUse(36.86, 6.44);
   await lookupLandUse(36.86, 6.44);
-  // Two lookups, each trying the primary then the mirror before giving up.
-  assert.equal(calls, 4, 'a failed lookup must not stick — the next poll should retry both endpoints');
+  // Two lookups, each walking the primary and both mirrors before giving up.
+  assert.equal(calls, 6, 'a failed lookup must not stick — the next poll should retry every endpoint');
 });
 
 function det(overrides: Partial<Detection>): Detection {
@@ -137,7 +137,7 @@ test('lookupLandUse: a connection-level failure on the primary retries once on t
   }) as typeof fetch;
 
   const info = await lookupLandUse(36.75, 3.08);
-  assert.deepEqual(tried, ['overpass-api.de', 'overpass.kumi.systems'], 'primary first, then the mirror — exactly once each');
+  assert.deepEqual(tried, ['overpass-api.de', 'overpass.kumi.systems'], 'primary first, then the first mirror — and it stops as soon as one answers');
   assert.equal(info.context, 'industrial');
   assert.equal(info.siteName, 'Centrale électrique du Hamma');
 });
@@ -154,7 +154,7 @@ test('lookupLandUse: a 429 or 5xx on the primary also falls through to the mirro
     }) as typeof fetch;
 
     const info = await lookupLandUse(36.1, 5.2);
-    assert.deepEqual(tried, ['overpass-api.de', 'overpass.kumi.systems'], `status ${status} must be retried on the mirror`);
+    assert.deepEqual(tried, ['overpass-api.de', 'overpass.kumi.systems'], `status ${status} must be retried on a mirror`);
     assert.equal(info.context, 'industrial');
   }
 });
@@ -168,5 +168,11 @@ test('lookupLandUse: both endpoints down still fails soft, and never queries a t
 
   const info = await lookupLandUse(35.0, 5.0);
   assert.equal(info.context, 'unknown');
-  assert.equal(tried.length, 2, 'one attempt per endpoint, no more');
+  assert.equal(tried.length, 3, 'one attempt per endpoint, no more');
+});
+
+test('industrialContextLine: Tifinagh in an OSM site name is stripped like anywhere else', () => {
+  const line = industrialContextLine('Bellara ⴱⵍⵍⴰⵔⴰ');
+  assert.match(line, /\(Bellara\)/);
+  assert.doesNotMatch(line, /[ⴰ-⵿]/u, 'no Tifinagh may reach a reader, site names included');
 });

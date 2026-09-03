@@ -36,15 +36,30 @@ export type { LandUseContext, LandUseInfo };
 
 const RADIUS_M = 1000;
 
-// Primary, then one mirror. The public instance is the right default (it is
-// the one whose fair-use policy this query is sized against), but it goes down
-// or rate limits often enough that a single failure should not blank out every
-// land-use lookup for the whole run — a 2026-09 replay lost all 675 events'
-// context to one unreachable host. Tried strictly in order, at most one retry.
+// Tried strictly in order until one answers. The canonical instance stays the
+// default — it is the one this query's size is polite against — but a single
+// unreachable host must not blank out land-use for a whole run: a 2026-09
+// replay lost all 675 events' context that way.
+//
+// ONLY FULL-PLANET INSTANCES BELONG HERE. A regional extract answers 200 with
+// an empty element list for anywhere outside its region, which this code reads
+// as "no industrial site nearby" — a silent false negative, strictly worse
+// than a failure. overpass.osm.ch looked like an ideal mirror on 2026-09-03
+// (0.16s, healthy) and is Switzerland-only: it reported Bellara and the El
+// Hamma power plant as 'natural'. Verify any new entry with a query over the
+// target region before adding it.
 const OVERPASS_ENDPOINTS = [
   'https://overpass-api.de/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
 ];
+
+// The primary answers healthy queries in about a second, so a short bound
+// there fails fast off a hung host. The mirrors are the degraded path and are
+// routinely loaded (30s+ on 2026-09-03) — waiting is better than losing the
+// context, since nothing downstream blocks on this.
+const PRIMARY_TIMEOUT_MS = 10_000;
+const MIRROR_TIMEOUT_MS = 30_000;
 
 // Tags that mark a probable non-wildfire, permanent heat-producing or
 // non-vegetation site. Not exhaustive — this is a coarse first-detection
@@ -82,13 +97,13 @@ export async function lookupLandUse(lat: number, lon: number): Promise<LandUseIn
   if (cached) return cached;
 
   let lastError: unknown;
-  for (const endpoint of OVERPASS_ENDPOINTS) {
+  for (const [index, endpoint] of OVERPASS_ENDPOINTS.entries()) {
     try {
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'content-type': 'text/plain', 'User-Agent': 'OzarEye/1.0' },
         body: overpassQuery(lat, lon),
-        signal: AbortSignal.timeout(10_000),
+        signal: AbortSignal.timeout(index === 0 ? PRIMARY_TIMEOUT_MS : MIRROR_TIMEOUT_MS),
       });
       // 429 and 5xx are the endpoint's problem, not the query's — worth asking
       // the mirror. A 4xx other than 429 would fail identically there, so it

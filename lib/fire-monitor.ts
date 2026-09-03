@@ -17,7 +17,7 @@
 import villagesData from '@/data/villages.json';
 import { distanceKm } from './geo';
 import { cardinalFr, classifyExposure, type WindRelation } from './wind';
-import { isolatedDisplayName } from './place-name';
+import { isolatedDisplayName, stripTifinagh } from './place-name';
 import { wilayaAt } from './wilaya';
 
 // Real point-in-polygon wilaya attribution for a fire centroid — used both for
@@ -491,7 +491,10 @@ function isolateIfArabic(name: string) {
 // industrial/energy site. Kept out of LABELS because it takes the site's OSM
 // name as a parameter.
 export function industrialContextLine(siteName?: string): string {
-  const site = siteName ? ` (${isolateIfArabic(siteName)})` : '';
+  // An OSM site name mixes scripts exactly like a village name does — same
+  // rule, same reason (see lib/place-name.ts).
+  const cleaned = siteName ? stripTifinagh(siteName) : '';
+  const site = cleaned ? ` (${isolateIfArabic(cleaned)})` : '';
   return `Détection sur zone industrielle connue${site} — probablement une source de chaleur permanente, pas un feu. À vérifier.`;
 }
 
