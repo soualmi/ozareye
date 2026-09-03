@@ -27,7 +27,8 @@
     "test:source-health": "tsx --test lib/source-health.test.ts",
     "test": "tsx --test lib/wind.test.ts lib/labels.test.ts lib/wilaya.test.ts lib/clustering.test.ts lib/config.test.ts lib/fetch-timeout.test.ts lib/landuse.test.ts lib/live-window.test.ts lib/place-name.test.ts lib/replay.test.ts lib/satellite-names.test.ts lib/source-health.test.ts",
     "replay": "tsx scripts/replay.ts",
-    "replay:metrics": "tsx scripts/replay-metrics.ts"
+    "replay:metrics": "tsx scripts/replay-metrics.ts",
+    "build-industrial-index": "tsx scripts/build-industrial-index.ts"
   },
   "dependencies": {
     "@base-ui/react": "1.7.0",
