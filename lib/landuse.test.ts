@@ -176,3 +176,34 @@ test('industrialContextLine: Tifinagh in an OSM site name is stripped like anywh
   assert.match(line, /\(Bellara\)/);
   assert.doesNotMatch(line, /[ⴰ-⵿]/u, 'no Tifinagh may reach a reader, site names included');
 });
+
+test('lookupLandUse: repeated failures pause lookups instead of holding up every later event', async () => {
+  let calls = 0;
+  global.fetch = (async () => { calls++; throw new TypeError('fetch failed'); }) as typeof fetch;
+
+  // Two failing lookups walk all three endpoints; the breaker then opens.
+  await lookupLandUse(36.0, 5.0);
+  await lookupLandUse(36.5, 5.5);
+  const afterTwo = calls;
+  assert.equal(afterTwo, 6);
+
+  // Every later event in the same run returns immediately, with no request.
+  for (let i = 0; i < 5; i++) assert.equal((await lookupLandUse(35 + i * 0.1, 4)).context, 'unknown');
+  assert.equal(calls, afterTwo, 'no further network calls while the breaker is open');
+});
+
+test('lookupLandUse: a success resets the failure count', async () => {
+  global.fetch = (async () => { throw new TypeError('fetch failed'); }) as typeof fetch;
+  await lookupLandUse(36.0, 5.0);
+  global.fetch = (async () => overpassResponse([])) as typeof fetch;
+  assert.equal((await lookupLandUse(36.5, 5.5)).context, 'natural');
+
+  global.fetch = (async () => { throw new TypeError('fetch failed'); }) as typeof fetch;
+  await lookupLandUse(37.0, 6.0);
+  // One earlier failure plus this one must not trip the breaker: the success in
+  // between cleared the count, so this lookup still reached the network.
+  let reached = false;
+  global.fetch = (async () => { reached = true; return overpassResponse([{ tags: { landuse: 'quarry' } }]); }) as typeof fetch;
+  await lookupLandUse(37.5, 6.5);
+  assert.ok(reached, 'the breaker must not be open after an intervening success');
+});

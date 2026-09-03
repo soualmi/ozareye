@@ -59,7 +59,27 @@ const OVERPASS_ENDPOINTS = [
 // routinely loaded (30s+ on 2026-09-03) — waiting is better than losing the
 // context, since nothing downstream blocks on this.
 const PRIMARY_TIMEOUT_MS = 10_000;
-const MIRROR_TIMEOUT_MS = 30_000;
+const MIRROR_TIMEOUT_MS = 25_000;
+
+// Circuit breaker. Land-use is best-effort context; alerts must never wait on
+// it. During the 2026-09-03 outage every endpoint failed and a lookup cost ~60s
+// of timeouts, so a single monitor run over ~50 events would have spent most of
+// an hour in here and delayed the alerts it exists to annotate. After a couple
+// of consecutive failures the whole feature goes quiet for a cooldown and
+// returns 'unknown' with no network call at all; the next run tries again. One
+// success anywhere resets it.
+const BREAKER_FAILURE_THRESHOLD = 2;
+const BREAKER_COOLDOWN_MS = 10 * 60_000;
+let consecutiveFailures = 0;
+let breakerOpenedAt = 0;
+
+function breakerOpen(now: number): boolean {
+  if (!breakerOpenedAt) return false;
+  if (now - breakerOpenedAt < BREAKER_COOLDOWN_MS) return true;
+  breakerOpenedAt = 0;
+  consecutiveFailures = 0;
+  return false;
+}
 
 // Tags that mark a probable non-wildfire, permanent heat-producing or
 // non-vegetation site. Not exhaustive — this is a coarse first-detection
@@ -95,6 +115,7 @@ export async function lookupLandUse(lat: number, lon: number): Promise<LandUseIn
   const cell = gridCell(lat, lon);
   const cached = cache.get(cell);
   if (cached) return cached;
+  if (breakerOpen(Date.now())) return { context: 'unknown' };
 
   let lastError: unknown;
   for (const [index, endpoint] of OVERPASS_ENDPOINTS.entries()) {
@@ -115,6 +136,7 @@ export async function lookupLandUse(lat: number, lon: number): Promise<LandUseIn
       const named = elements.find(e => e.tags?.name);
       const info: LandUseInfo = elements.length ? { context: 'industrial', siteName: named?.tags?.name } : { context: 'natural' };
       cache.set(cell, info);
+      consecutiveFailures = 0;
       return info;
     } catch (error) {
       lastError = error;
@@ -123,8 +145,12 @@ export async function lookupLandUse(lat: number, lon: number): Promise<LandUseIn
     }
   }
   if (lastError) console.log(`land-use lookup FAILED for cell ${cell}: ${lastError instanceof Error ? lastError.message : lastError}`);
+  if (++consecutiveFailures >= BREAKER_FAILURE_THRESHOLD && !breakerOpenedAt) {
+    breakerOpenedAt = Date.now();
+    console.log(`land-use: ${consecutiveFailures} consecutive failures — pausing lookups for ${BREAKER_COOLDOWN_MS / 60_000}min so alerts aren't held up`);
+  }
   return { context: 'unknown' };
 }
 
 // Test-only: clears the process-lifetime cache between test cases.
-export function _clearCacheForTests() { cache.clear(); }
+export function _clearCacheForTests() { cache.clear(); consecutiveFailures = 0; breakerOpenedAt = 0; }
