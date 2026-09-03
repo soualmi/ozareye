@@ -14,12 +14,24 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-// One-shot backfill: re-evaluates every stored production event whose
-// landUseContext is 'unknown' (the state Overpass being unreachable left
-// them in) against the new local index (lib/landuse.ts), now that
-// data/industrial-sites.json exists. Events already tagged 'industrial' or
-// 'natural' are left exactly as they are — this only fills in what the old
-// live Overpass path couldn't answer.
+// One-shot backfill: re-evaluates every stored production event that has ANY
+// landUseContext — industrial, natural, or unknown — against the current
+// local index (lib/landuse.ts). Only events with no landUseContext at all
+// ('absent': stored before the land-use feature existed) are left untouched.
+//
+// Re-evaluating 'natural' events too (not just 'unknown', as the first
+// version of this script did) matters now specifically: the very first
+// index build only ever got a site's centroid from Overpass (`out center`,
+// no bounds), so every way/relation matched within a flat 1000m of its
+// centre and nothing else — a detection genuinely inside a large industrial
+// zone's footprint, but more than 1000m from that zone's centroid (e.g. the
+// Skikda/Sonatrach case that prompted this), came back 'natural', wrongly.
+// The rebuilt index (scripts/build-industrial-index.ts) now carries real
+// bounds, and lib/landuse.ts matches "inside bounds" as well as "near
+// centre" — so some previously-'natural' events are now correctly
+// 'industrial'. Previously-'industrial' events are re-evaluated too, purely
+// for consistency; the new matching rule is a strict superset of the old
+// one, so none should flip away from 'industrial'.
 //
 // Runs against the real production database (data/signals.db) — no
 // ALGERIE_FEUX_DB_PATH override, unlike the replay tooling, which refuses to
@@ -29,6 +41,7 @@
 import { initDb, eventsBetween, saveSignal } from '../lib/database';
 import { lookupLandUse } from '../lib/landuse';
 import { lowerStatus, telegramText, type FireEvent, type LandUseContext } from '../lib/fire-monitor';
+import { toDashboardEvent } from '../lib/dashboard-view';
 
 type Category = LandUseContext | 'absent';
 
@@ -50,46 +63,62 @@ async function main() {
 
   const before = tally(events.map(e => categoryOf(e.landUse?.context)));
 
-  let reevaluated = 0, changedToIndustrial = 0, changedToNatural = 0;
+  let reevaluated = 0, becameIndustrialCount = 0, becameNaturalCount = 0, changedCount = 0;
   const after: Category[] = [];
   const updatedById = new Map<string, FireEvent>();
   for (const event of events) {
-    const current = categoryOf(event.landUse?.context);
-    if (current !== 'unknown') { after.push(current); continue; }
+    const previous = categoryOf(event.landUse?.context);
+    if (previous === 'absent') { after.push(previous); continue; }
 
     reevaluated++;
     const landUse = await lookupLandUse(event.latitude, event.longitude);
-    const updated = landUse.context === 'industrial'
-      ? { ...event, landUse, status: lowerStatus(event.status) }
-      : { ...event, landUse };
+    // Only lower status on a genuine transition INTO industrial. An event
+    // already 'industrial' had its status lowered the first time it was
+    // classified that way — re-applying lowerStatus() on every backfill run
+    // would double-downgrade it (urgent -> corroborated -> observation)
+    // instead of leaving an already-correct status alone.
+    const becameIndustrial = landUse.context === 'industrial' && previous !== 'industrial';
+    const updated = becameIndustrial ? { ...event, landUse, status: lowerStatus(event.status) } : { ...event, landUse };
     await saveSignal(updated);
     updatedById.set(event.id, updated);
-    after.push(categoryOf(landUse.context));
-    if (landUse.context === 'industrial') changedToIndustrial++;
-    else if (landUse.context === 'natural') changedToNatural++;
+    const next = categoryOf(landUse.context);
+    after.push(next);
+    if (next !== previous) {
+      changedCount++;
+      if (next === 'industrial') becameIndustrialCount++;
+      else if (next === 'natural') becameNaturalCount++;
+    }
   }
 
   const afterCounts = tally(after);
 
-  console.log(`\nRe-evaluated ${reevaluated} 'unknown' event(s): ${changedToIndustrial} -> industrial, ${changedToNatural} -> natural, ${reevaluated - changedToIndustrial - changedToNatural} still unknown.`);
+  console.log(`\nRe-evaluated ${reevaluated} event(s) with a stored land-use context: ${changedCount} changed (${becameIndustrialCount} -> industrial, ${becameNaturalCount} -> natural).`);
   console.log('\nBefore:');
   for (const [cat, n] of Object.entries(before)) console.log(`  ${cat}: ${n}`);
   console.log('After:');
   for (const [cat, n] of Object.entries(afterCounts)) console.log(`  ${cat}: ${n}`);
 
-  // El Hamma power plant (Algiers), the event named in the incident that
-  // motivated this backfill — confirm it now carries the 🏭 note.
-  const ELHAMMA_LAT = 36.7490, ELHAMMA_LON = 3.0825;
-  const near = events.filter(e => Math.hypot(e.latitude - ELHAMMA_LAT, e.longitude - ELHAMMA_LON) < 0.05);
-  if (near.length === 0) {
-    console.log('\nNo stored event near El Hamma (36.7490, 3.0825) to confirm.');
-  } else {
-    console.log(`\nEvent(s) near El Hamma (${near.length}):`);
+  // The Skikda/Sonatrach event (36.8683, 6.9824) that motivated the bounds
+  // rework, plus El Hamma from the original incident — confirm both now
+  // carry the industrial title/🏭 note.
+  const CHECKS: { label: string; lat: number; lon: number }[] = [
+    { label: 'Skikda/Sonatrach', lat: 36.8683, lon: 6.9824 },
+    { label: 'El Hamma', lat: 36.7490, lon: 3.0825 },
+  ];
+  for (const check of CHECKS) {
+    const near = events.filter(e => Math.hypot(e.latitude - check.lat, e.longitude - check.lon) < 0.05);
+    if (near.length === 0) {
+      console.log(`\nNo stored event near ${check.label} (${check.lat}, ${check.lon}) to confirm.`);
+      continue;
+    }
+    console.log(`\nEvent(s) near ${check.label} (${near.length}):`);
     for (const e of near) {
       const fresh = updatedById.get(e.id) ?? e;
       const text = telegramText(fresh, new Date());
+      const dashboardEvent = toDashboardEvent(fresh, new Date());
       console.log(`  ${e.id}: landUse=${JSON.stringify(fresh.landUse)} status=${fresh.status}`);
-      console.log(`    carries 🏭 note: ${text.includes('🏭')}`);
+      console.log(`    title: ${dashboardEvent.title}`);
+      console.log(`    carries 🏭 note (Telegram): ${text.includes('🏭')}`);
     }
   }
 }
