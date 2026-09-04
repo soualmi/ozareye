@@ -16,9 +16,10 @@
 
 import {
   ALERT_SCORE_THRESHOLD, clusterDetections, EARLY_DETECTION_ANOMALY_MIN_SAMPLES, EARLY_DETECTION_ANOMALY_MULTIPLIER, effectiveProximityKm, enrichWeather, eventWilaya, fetchDetections, gridCell, hasNearbyVillage, isMeteosatDetection, lowerStatus, telegramText,
-  DEFAULT_PERSISTENT_SOURCE_WINDOW_DAYS, FIRMS_SOURCES, MTG_SOURCE, type Detection, type FireEvent,
+  DEFAULT_PERSISTENT_SOURCE_WINDOW_DAYS, FIRMS_SOURCES, MTG_SOURCE, SLSTR_SOURCE, type Detection, type FireEvent,
 } from '@/lib/fire-monitor';
 import { fetchMeteosatSlots } from '@/lib/meteosat';
+import { fetchSlstrPasses } from '@/lib/slstr';
 import { lookupLandUse } from '@/lib/landuse';
 import { activeEvents, distinctDayCount, frpBaseline, getConfig, initDb, isFirstRun, pruneFrpHistory, pruneHotspotHistory, recordDetectionDay, recordFrpObservation, saveSignal, type EngineConfig } from '@/lib/database';
 import { bboxToString } from '@/scripts/build-villages';
@@ -35,15 +36,18 @@ preferIpv4();
 const ESCALATION_SCORE_DELTA = 15;
 const STATUS_RANK: Record<FireEvent['status'], number> = { observation: 0, corroborated: 1, urgent: 2 };
 
-// Meteosat fusion, rule (e), locked: a Meteosat-only event alerts ONLY once
-// it's cleared the 2-pass/~30min gate (already enforced by scoreEvent()
-// capping status at 'corroborated' only when that gate is met — 'observation'
-// otherwise) AND a village sits within the widened (±3km) proximity radius.
-// Status can never exceed 'corroborated' for these events, so there is no
-// "escalation" to re-alert on — this fires exactly once, when the gate is
-// first met, same one-shot shape as a VIIRS event's very first alert.
+// Meteosat/SLSTR fusion, rule (e)/(c), locked and extended to SLSTR: a
+// secondary-only event (Meteosat-only, SLSTR-only, or a mix) alerts ONLY
+// once it's cleared the secondary alert gate (already enforced by
+// scoreEvent() capping status at 'corroborated' only when that gate is met —
+// 'observation' otherwise) AND a village sits within the widened proximity
+// radius (±3km for Meteosat, ±1km for SLSTR — effectiveProximityKm already
+// knows the difference). Status can never exceed 'corroborated' for these
+// events, so there is no "escalation" to re-alert on — this fires exactly
+// once, when the gate is first met, same one-shot shape as a VIIRS event's
+// very first alert.
 function shouldAlert(event: FireEvent, proximityKm: number) {
-  if (event.positionSource === 'meteosat') {
+  if (event.positionSource === 'meteosat' || event.positionSource === 'slstr') {
     if (event.status !== 'corroborated') return false;
     if (!hasNearbyVillage(event, effectiveProximityKm(event, proximityKm))) return false;
     return event.notifiedStatus !== 'corroborated';
@@ -90,14 +94,17 @@ async function suppressPersistentSources(detections: Detection[], persistentSour
 }
 
 // Détection précoce, signal 2 (lib/fire-monitor.ts's EARLY_DETECTION_ANOMALY_*):
-// flags a VIIRS detection whose FRP is significantly above the stored
-// 30-day local (cell, hour-of-day) baseline — reuses hotspot_days'
-// window/cutoff shape (see suppressPersistentSources above), on the
-// sibling frp_history table (lib/database.ts). The baseline is read BEFORE
-// today's own value is recorded, so a detection is never compared against
-// itself. Meteosat detections are skipped entirely — they carry no FRP to
-// compare (always 0). Fail-soft per detection: any DB error just skips
-// that one detection's annotation, never blocks or throws.
+// flags a detection whose FRP is significantly above the stored 30-day
+// local (cell, hour-of-day) baseline — reuses hotspot_days' window/cutoff
+// shape (see suppressPersistentSources above), on the sibling frp_history
+// table (lib/database.ts). The baseline is read BEFORE today's own value is
+// recorded, so a detection is never compared against itself. Meteosat
+// detections are skipped entirely — they carry no FRP to compare (always
+// 0). SLSTR detections are NOT skipped: unlike Meteosat, SLSTR carries a
+// real per-detection FRP (see lib/slstr.ts), so it's a legitimate anomaly
+// signal too, and isMeteosatDetection() below only ever excludes Meteosat.
+// Fail-soft per detection: any DB error just skips that one detection's
+// annotation, never blocks or throws.
 async function annotateFrpAnomaly(detections: Detection[]): Promise<Detection[]> {
   const cutoff = new Date(Date.now() - DEFAULT_PERSISTENT_SOURCE_WINDOW_DAYS * 86_400_000).toISOString().slice(0, 10);
   await pruneFrpHistory(cutoff);
@@ -182,7 +189,7 @@ async function runMonitor(request: Request): Promise<Response> {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.log(`monitor run CRASHED before sources were polled: ${message}`);
-    await Promise.all([...FIRMS_SOURCES, MTG_SOURCE].map(source => recordSourceOutcome(source, { success: false, error: `run crashed: ${message}`.slice(0, 200) })));
+    await Promise.all([...FIRMS_SOURCES, MTG_SOURCE, SLSTR_SOURCE].map(source => recordSourceOutcome(source, { success: false, error: `run crashed: ${message}`.slice(0, 200) })));
     return Response.json({ error: 'Erreur interne' }, { status: 500 });
   }
 
@@ -197,13 +204,21 @@ async function runMonitor(request: Request): Promise<Response> {
   const meteosatResult = await fetchMeteosatSlots(config.bbox);
   await recordSourceOutcome(MTG_SOURCE, meteosatResult.ok ? { success: true } : { success: false, error: meteosatResult.error ?? 'erreur inconnue' });
 
-  const { kept, suppressed } = await suppressPersistentSources([...rawDetections, ...meteosatResult.detections], config.persistentSourceDays);
+  // SLSTR: same independent, sequential, fail-soft shape as Meteosat above —
+  // a slow/down Copernicus Data Store never holds up VIIRS or Meteosat, and
+  // its own failure is watchdog-tracked exactly like theirs (see
+  // lib/slstr.ts's fail-soft contract).
+  const slstrResult = await fetchSlstrPasses(config.bbox);
+  await recordSourceOutcome(SLSTR_SOURCE, slstrResult.ok ? { success: true } : { success: false, error: slstrResult.error ?? 'erreur inconnue' });
+
+  const { kept, suppressed } = await suppressPersistentSources([...rawDetections, ...meteosatResult.detections, ...slstrResult.detections], config.persistentSourceDays);
   const detections = await annotateFrpAnomaly(kept);
   const events = clusterDetections(detections, await activeEvents(), config.frpThresholdMw);
 
   const sourcesLog = [
     ...sourceResults.map(r => ({ source: r.source, rows: r.rows === null ? 'FAILED' : r.rows.length })),
     { source: MTG_SOURCE, rows: meteosatResult.ok ? meteosatResult.detections.length : 'FAILED' },
+    { source: SLSTR_SOURCE, rows: slstrResult.ok ? slstrResult.detections.length : 'FAILED' },
   ];
 
   if (firstRun) {
@@ -222,9 +237,13 @@ async function runMonitor(request: Request): Promise<Response> {
     // A Meteosat-only event never carries real FRP/confidence, so its raw
     // score alone rarely crosses 55 — but rule (e)'s gate needs real
     // wind/village data to render a coherent message once it clears
-    // 'corroborated', same as any VIIRS event that would enrich anyway.
-    const meteosatEligible = raw.positionSource === 'meteosat' && raw.status === 'corroborated';
-    let event = (raw.score >= 55 || meteosatEligible) ? await enrichWeather(raw) : raw;
+    // 'corroborated', same as any VIIRS event that would enrich anyway. An
+    // SLSTR-only event CAN carry real FRP/confidence and so can legitimately
+    // cross 55 on its own, but is included here too for the same reason:
+    // rule (c) caps its status the same way, and enrichment must not depend
+    // on whether this particular fire happened to be intense enough.
+    const secondaryEligible = (raw.positionSource === 'meteosat' || raw.positionSource === 'slstr') && raw.status === 'corroborated';
+    let event = (raw.score >= 55 || secondaryEligible) ? await enrichWeather(raw) : raw;
     event = await applyLandUse(event);
     const proximityKm = effectiveProximityKm(event, config.proximityKm);
     if (shouldAlert(event, config.proximityKm)) {

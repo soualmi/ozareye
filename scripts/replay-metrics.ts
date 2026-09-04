@@ -112,7 +112,13 @@ function firstAlert(event: FireEvent): FirstAlert | null {
 // included. Used only by §7: unlike firstAlert() above, this correctly finds
 // a Meteosat-only event's alerting poll (gated on status, not a score
 // threshold its score can't realistically reach).
-type ReconstructedAlert = { atIso: string; frpAtAlert: number; passesAtAlert: number; positionSourceAtAlert: 'viirs' | 'meteosat' };
+// Widened to FireEvent's own positionSource type (not a hand-rolled
+// 'viirs' | 'meteosat' union) — this replay path only ever feeds VIIRS and
+// Meteosat detections through clusterDetections() (see this feature's own
+// note: SLSTR is deliberately NOT wired into replay), but scoreEvent()'s
+// return type now includes 'slstr' too, so the annotation here must accept
+// it to type-check even though it can never actually occur at runtime here.
+type ReconstructedAlert = { atIso: string; frpAtAlert: number; passesAtAlert: number; positionSourceAtAlert: NonNullable<FireEvent['positionSource']> };
 
 function reconstructAlert(event: FireEvent, proximityKm: number): ReconstructedAlert | null {
   const buckets = new Map<number, typeof event.detections>();

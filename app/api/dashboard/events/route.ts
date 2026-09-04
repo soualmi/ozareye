@@ -17,14 +17,15 @@
 import { activeEvents, getConfig, getSourceHealth } from '@/lib/database';
 import { isAuthenticated } from '@/lib/dashboard-auth';
 import { toDashboardEvent } from '@/lib/dashboard-view';
-import { FIRMS_SOURCES, MTG_SOURCE } from '@/lib/fire-monitor';
+import { FIRMS_SOURCES, MTG_SOURCE, SLSTR_SOURCE } from '@/lib/fire-monitor';
 import { satelliteName } from '@/lib/satellite-names';
 
-// The 3 FIRMS/VIIRS sources plus Meteosat — kept as a separate concat rather
-// than editing FIRMS_SOURCES itself, since that constant is also reused by
-// app/api/monitor/route.ts's crash-path (which lists MTG_SOURCE alongside it
-// there too, but the two lists serve different call sites, not one shared one).
-const ALL_SOURCES = [...FIRMS_SOURCES, MTG_SOURCE];
+// The 3 FIRMS/VIIRS sources plus Meteosat and SLSTR — kept as a separate
+// concat rather than editing FIRMS_SOURCES itself, since that constant is
+// also reused by app/api/monitor/route.ts's crash-path (which lists
+// MTG_SOURCE/SLSTR_SOURCE alongside it there too, but the two lists serve
+// different call sites, not one shared one).
+const ALL_SOURCES = [...FIRMS_SOURCES, MTG_SOURCE, SLSTR_SOURCE];
 
 // Read-only: pulls stored events from the DB only. Never calls FIRMS, never
 // sends Telegram — that's /api/monitor's job, untouched by this route.

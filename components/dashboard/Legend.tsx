@@ -28,6 +28,7 @@ const ROWS: { swatch: React.ReactNode; label: string }[] = [
   { swatch: <span className="text-base leading-none text-[#4fa3ff]">↑</span>, label: 'flèche = direction vers laquelle souffle le vent' },
   { swatch: <span className="inline-block h-0 w-4 border-t-2 border-dashed" style={{ borderColor: '#7aa697' }} />, label: 'trait pointillé = lien feu → village exposé' },
   { swatch: <span className="inline-block h-3 w-3 rounded-full border-2 border-dashed" style={{ borderColor: '#8da79d' }} />, label: 'rond pointillé = position approximative Meteosat (±3km), non confirmé par satellite polaire' },
+  { swatch: <span className="inline-block h-3 w-3 rounded-full border-2 border-dotted" style={{ borderColor: '#4fa3ff' }} />, label: 'rond en pointillés fins = position approximative Sentinel-3 SLSTR (±1km), non corroboré par VIIRS' },
 ];
 
 export default function Legend() {
@@ -50,7 +51,7 @@ export default function Legend() {
             ))}
           </ul>
           <div className="border-t border-white/10 px-3 py-2 text-[11px] text-[#8da79d]">
-            Sources : NASA FIRMS · MTG Active Fire Monitoring — EUMETSAT · Open-Meteo
+            Sources : NASA FIRMS · MTG Active Fire Monitoring — EUMETSAT · Copernicus Sentinel-3 SLSTR · Open-Meteo
           </div>
         </>
       )}

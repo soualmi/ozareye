@@ -47,11 +47,13 @@ export type DashboardEvent = {
   landUseSiteName?: string;
   title: string;
   industrialLeadLine?: string;
-  // Meteosat fusion: 'meteosat' means the position is a ~3km-uncertainty
-  // geostationary pixel, never corroborated by a polar overpass (see
-  // lib/fire-monitor.ts's locked fusion rules). geoTracked is the opposite
+  // Meteosat/SLSTR fusion: 'meteosat' means the position is a
+  // ~3km-uncertainty geostationary pixel, never corroborated by a polar
+  // overpass; 'slstr' means a ~1km-uncertainty SLSTR (also polar, like
+  // VIIRS) pixel, not yet corroborated by VIIRS specifically (see
+  // lib/fire-monitor.ts's locked fusion rules). geoTracked is a different
   // situation — a VIIRS-confirmed fire ALSO getting Meteosat's ~10min revisit.
-  positionSource: 'viirs' | 'meteosat';
+  positionSource: 'viirs' | 'meteosat' | 'slstr';
   positionUncertaintyKm?: number;
   geoTracked: boolean;
 };

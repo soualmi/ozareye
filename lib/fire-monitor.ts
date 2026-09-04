@@ -30,11 +30,16 @@ export function eventWilaya(event: Pick<FireEvent, 'latitude' | 'longitude'>): s
 export type Detection = {
   latitude: number; longitude: number; acquiredAt: string;
   satellite: string; instrument: string; confidence: string; frp: number;
-  // Meteosat only — the CAP circle's own reported detection radius (km),
-  // when the product provided one. Falls back to
-  // METEOSAT_POSITION_UNCERTAINTY_KM below when absent (a malformed/legacy
-  // CAP entry) — never fabricated as a real reading.
+  // Meteosat/SLSTR only — the source's own reported detection radius (km),
+  // when it provided one (Meteosat's CAP circle radius; SLSTR emits none
+  // today, see lib/slstr.ts). Falls back to METEOSAT_POSITION_UNCERTAINTY_KM
+  // / SLSTR_POSITION_UNCERTAINTY_KM below when absent — never fabricated as
+  // a real reading.
   radiusKm?: number;
+  // SLSTR only — the FRP measurement's own uncertainty (MW), as reported by
+  // the product (see scripts/slstr-fetch.py). Distinct from radiusKm (a
+  // POSITION uncertainty, km) — never conflated with it.
+  uncertaintyMw?: number;
   // VIIRS only — set upstream (app/api/monitor/route.ts, before
   // clusterDetections) when this detection's FRP is significantly above the
   // stored 30-day local baseline for its grid cell/hour-of-day. Computed
@@ -72,16 +77,20 @@ export type FireEvent = {
   villages?: VillageExposure[];
   landUse?: LandUseInfo;
   notifiedAt?: string; notifiedScore?: number; notifiedStatus?: FireEvent['status'];
-  // Meteosat fusion (see clusterDetections/scoreEvent below) — recomputed
-  // from event.detections every poll, exactly like maxFrp/passCount above,
-  // never trusted as separately-mutated state. 'viirs' (or absent, for
-  // events saved before this feature existed) whenever the event has at
-  // least one polar (VIIRS) pass, regardless of how many Meteosat passes
-  // also hit it — a Meteosat pixel NEVER moves a VIIRS-anchored position.
-  positionSource?: 'viirs' | 'meteosat';
-  // ~3km, only set when positionSource is 'meteosat' — the FCI pixel size,
-  // not a made-up figure. Undefined (not 0) once VIIRS re-anchors the event,
-  // so the dashboard/Telegram "±3km" caveat disappears along with the cap.
+  // Meteosat/SLSTR fusion (see clusterDetections/scoreEvent below) —
+  // recomputed from event.detections every poll, exactly like
+  // maxFrp/passCount above, never trusted as separately-mutated state.
+  // 'viirs' (or absent, for events saved before this feature existed)
+  // whenever the event has at least one polar (VIIRS) pass, regardless of
+  // how many Meteosat/SLSTR passes also hit it — neither of those ever
+  // moves a VIIRS-anchored position. 'slstr' takes priority over 'meteosat'
+  // when both non-VIIRS sources are present but VIIRS isn't — SLSTR's
+  // ~1km footprint is tighter than Meteosat's, the more informative label.
+  positionSource?: 'viirs' | 'meteosat' | 'slstr';
+  // ~3km (Meteosat) or ~1km (SLSTR), only set when positionSource isn't
+  // 'viirs' — the source's own pixel size, not a made-up figure. Undefined
+  // (not 0) once VIIRS re-anchors the event, so the dashboard/Telegram
+  // "±Xkm" caveat disappears along with the cap.
   positionUncertaintyKm?: number;
   // True once a VIIRS-anchored event has also been hit by >=1 Meteosat pass —
   // "confirmed fire, now also getting the ~10min geostationary revisit" is a
@@ -140,24 +149,55 @@ export function isMeteosatDetection(d: Detection): boolean {
 // figure is used only when a detection has none (a malformed/legacy CAP
 // entry), not as the everyday value.
 export const METEOSAT_POSITION_UNCERTAINTY_KM = 3;
-
-// The radius to treat a single Meteosat detection as covering: its own
-// CAP-reported value when present, the flat fallback otherwise. Every join/
-// uncertainty/widened-proximity computation below goes through this rather
-// than the constant directly, so a real per-detection radius always wins.
-function meteosatDetectionRadiusKm(det: Detection): number {
-  return det.radiusKm && det.radiusKm > 0 ? det.radiusKm : METEOSAT_POSITION_UNCERTAINTY_KM;
-}
 // Real measured cadence (see the product inspection this feature shipped
 // with): every 10 minutes, not the 15 originally assumed. Shown verbatim in
 // the "suivi Meteosat" copy below.
 export const METEOSAT_CADENCE_MIN = 10;
-const METEOSAT_ALERT_MIN_DETECTIONS = 2;
+
+// Copernicus Sentinel-3 SLSTR Level 2 FRP (lib/slstr.ts feeds these into the
+// same clusterDetections() VIIRS and Meteosat already use). Unlike Meteosat,
+// SLSTR is polar (same orbit family as VIIRS) and carries a REAL per-
+// detection FRP — its value is detection sensitivity at its own passage
+// times, not filling Meteosat's temporal gap. `instrument` is the natural
+// field to key fusion on, same convention as isMeteosatDetection above.
+export const SLSTR_SOURCE = 'SLSTR_FRP';
+const SLSTR_INSTRUMENT = 'SLSTR';
+export function isSlstrDetection(d: Detection): boolean {
+  return d.instrument === SLSTR_INSTRUMENT;
+}
+// Fallback only — the product carries no per-detection position-uncertainty
+// field (see scripts/slstr-fetch.py), so this — SLSTR's real ~1km MWIR grid
+// spacing — is used for every SLSTR detection, not just malformed ones.
+export const SLSTR_POSITION_UNCERTAINTY_KM = 1;
+// Real measured cadence over Algeria: 4 products/day (2 from S3A, 2 from
+// S3B), confirmed during this feature's own access test.
+export const SLSTR_CADENCE_PER_DAY = 4;
+
+// True for a detection from either non-VIIRS fusion source. The single fact
+// eventHasViirs/recomputeCentroid key everything on: neither Meteosat nor
+// SLSTR ever anchors an event's position once a real VIIRS pass exists.
+function isSecondaryDetection(d: Detection): boolean {
+  return isMeteosatDetection(d) || isSlstrDetection(d);
+}
+
+// The radius to treat a single Meteosat/SLSTR detection as covering: its own
+// reported value when present, the source's flat fallback otherwise. Every
+// join/uncertainty/widened-proximity computation below goes through this
+// rather than either constant directly, so a real per-detection radius
+// always wins when one exists.
+function secondaryDetectionRadiusKm(det: Detection): number {
+  if (isSlstrDetection(det)) return det.radiusKm && det.radiusKm > 0 ? det.radiusKm : SLSTR_POSITION_UNCERTAINTY_KM;
+  return det.radiusKm && det.radiusKm > 0 ? det.radiusKm : METEOSAT_POSITION_UNCERTAINTY_KM;
+}
+
+const SECONDARY_ALERT_MIN_DETECTIONS = 2;
 // "~2 consecutive passes, ~30 min apart" — kept as an absolute 30-minute
-// span (not "2 cadence cycles", which the real 10min cadence would make too
-// permissive at 10-20min) so a Meteosat-only signal must persist across at
-// least 3 real revisits before it can ever alert, not just repeat once.
-const METEOSAT_ALERT_MIN_SPAN_MIN = 30;
+// span (not "2 cadence cycles", which Meteosat's real 10min cadence would
+// make too permissive at 10-20min) so a single-sensor, VIIRS-less signal
+// must persist across at least 3 real revisits before it can ever alert,
+// not just repeat once. Applied to Meteosat-only and SLSTR-only events
+// alike — see meetsSecondaryAlertGate below.
+const SECONDARY_ALERT_MIN_SPAN_MIN = 30;
 
 // "Détection précoce" (early detection) — three small, additive score
 // boosts, NOT a replacement for clustering or the ALERT_SCORE_THRESHOLD
@@ -204,14 +244,24 @@ export const EARLY_DETECTION_ANOMALY_MIN_SAMPLES = 3;
 // this specifically requires >=2 and only affects `score`.
 const EARLY_DETECTION_METEOSAT_PERSISTENCE_MIN_PASSES = 2;
 const EARLY_DETECTION_METEOSAT_PERSISTENCE_BOOST = 8;
+// Signal 3b — SLSTR persistence: the same shape as signal 3 above, keyed on
+// SLSTR passes instead of Meteosat ones. Independent-sensor persistence, so
+// the two boosts stack additively when an event genuinely has >=2 passes
+// from BOTH secondary sensors — a stronger claim than either alone, exactly
+// like the score ladder already treats every other additive signal here.
+const EARLY_DETECTION_SLSTR_PERSISTENCE_MIN_PASSES = 2;
+const EARLY_DETECTION_SLSTR_PERSISTENCE_BOOST = 8;
 
-// Rule (c), locked: "villages: proximity radius widened by 3km" for a
-// Meteosat-positioned event — the position itself carries that much
-// uncertainty, so a village just outside the normal proximityKm can still be
-// the one actually at risk. Used both for the Meteosat-only alert gate
-// (route.ts) and for which villages the message names (telegramText below).
+// Rule (c), locked: "villages: proximity radius widened" for a Meteosat- or
+// SLSTR-positioned event — the position itself carries that much
+// uncertainty (Meteosat ~3km, SLSTR ~1km), so a village just outside the
+// normal proximityKm can still be the one actually at risk. Used both for
+// the secondary-only alert gate (route.ts) and for which villages the
+// message names (telegramText below).
 export function effectiveProximityKm(event: Pick<FireEvent, 'positionSource' | 'positionUncertaintyKm'>, proximityKm: number): number {
-  return event.positionSource === 'meteosat' ? proximityKm + (event.positionUncertaintyKm ?? METEOSAT_POSITION_UNCERTAINTY_KM) : proximityKm;
+  if (event.positionSource === 'meteosat') return proximityKm + (event.positionUncertaintyKm ?? METEOSAT_POSITION_UNCERTAINTY_KM);
+  if (event.positionSource === 'slstr') return proximityKm + (event.positionUncertaintyKm ?? SLSTR_POSITION_UNCERTAINTY_KM);
+  return proximityKm;
 }
 // A village this close to the fire is always named, regardless of wind
 // classification — at this range wind direction can shift, terrain deflects it,
@@ -330,23 +380,31 @@ function withinClusterWindow(ev: FireEvent, det: Detection): boolean {
   return ev.detections.some(d => hoursBetween(d.acquiredAt, det.acquiredAt) <= CLUSTER_TIME_HOURS);
 }
 
-// True once `ev` has at least one non-Meteosat (polar/VIIRS) detection —
+// True for a real polar (VIIRS) detection — everything that isn't a
+// secondary (Meteosat/SLSTR) one. The complement of isSecondaryDetection,
+// named for readability at call sites below.
+function isViirsDetection(d: Detection): boolean {
+  return !isSecondaryDetection(d);
+}
+
+// True once `ev` has at least one non-secondary (polar/VIIRS) detection —
 // the single fact the fusion rules below key everything on. Recomputed from
 // detections rather than trusted from a stored flag, same philosophy as
 // maxFrp/passCount in scoreEvent().
 function eventHasViirs(ev: FireEvent): boolean {
-  return ev.detections.some(d => !isMeteosatDetection(d));
+  return ev.detections.some(isViirsDetection);
 }
 
 // Rule (a)/(b)/(d), locked: once an event has any VIIRS pass, its position is
-// the average of ONLY its VIIRS detections forever after — a Meteosat pixel
-// joining later (rule a) or a Meteosat-only event being re-anchored by a
-// first VIIRS pass (rule d) must never move it. An event with no VIIRS pass
-// yet keeps averaging all its Meteosat detections (rule b) — the same
-// "average everything" behaviour this function replaces, just scoped to
-// whichever detections are allowed to count.
+// the average of ONLY its VIIRS detections forever after — a Meteosat or
+// SLSTR pixel joining later (rule a) or a secondary-only event being
+// re-anchored by a first VIIRS pass (rule d) must never move it. An event
+// with no VIIRS pass yet keeps averaging all its secondary detections (rule
+// b, generalized to cover a mix of Meteosat and SLSTR) — the same "average
+// everything" behaviour this function replaces, just scoped to whichever
+// detections are allowed to count.
 function recomputeCentroid(ev: FireEvent): void {
-  const anchor = ev.detections.filter(d => !isMeteosatDetection(d));
+  const anchor = ev.detections.filter(isViirsDetection);
   const pool = anchor.length > 0 ? anchor : ev.detections;
   ev.latitude = average(pool.map(d => d.latitude));
   ev.longitude = average(pool.map(d => d.longitude));
@@ -363,11 +421,12 @@ function joinDetection(det: Detection, events: FireEvent[], joinRadiusForEvent: 
   if (best) {
     const isDuplicate = best.detections.some(d => isSameDetection(d, det));
     if (!isDuplicate) {
-      const wasMeteosatOnly = !eventHasViirs(best);
+      const wasSecondaryOnly = !eventHasViirs(best);
+      const previousSource = best.detections.some(isSlstrDetection) ? 'SLSTR' : best.detections.some(isMeteosatDetection) ? 'Meteosat' : 'secondary';
       best.detections.push(det);
       recomputeCentroid(best);
-      if (wasMeteosatOnly && !isMeteosatDetection(det)) {
-        console.log(`event ${best.id}: re-anchored from Meteosat-only to VIIRS position (rule d)`);
+      if (wasSecondaryOnly && isViirsDetection(det)) {
+        console.log(`event ${best.id}: re-anchored from ${previousSource}-only to VIIRS position (rule d)`);
       }
       best.firstAcquiredAt = best.detections.reduce((min, d) => d.acquiredAt < min ? d.acquiredAt : min, best.firstAcquiredAt);
       best.lastAcquiredAt = best.detections.reduce((max, d) => d.acquiredAt > max ? d.acquiredAt : max, best.lastAcquiredAt);
@@ -383,24 +442,26 @@ function joinDetection(det: Detection, events: FireEvent[], joinRadiusForEvent: 
  * `events` is mutated in place and returned. One event = one fire, so
  * downstream alerting fires once per event, not once per pixel.
  *
- * Meteosat fusion (locked rules a-e, see the feature's commit/PR notes):
- * a Meteosat detection always joins at ITS OWN CAP-reported radius
- * (meteosatDetectionRadiusKm — real values run ~1.1-1.9km, not a flat
- * figure), whether the match is VIIRS-anchored (rule a: attaches as a pass,
- * never moves the position) or Meteosat-only (rule b: position is the mean
- * of Meteosat detections). A VIIRS detection joins at the normal 2km radius
- * against a VIIRS-anchored event, but widens to the TARGET Meteosat-only
- * event's own positionUncertaintyKm specifically to catch (and re-anchor,
- * rule d) it — so a wide-footprint Meteosat detection is easier to
- * re-anchor than a tight one, honestly reflecting its real uncertainty.
- * Status capping and the 2-pass/~30min alert gate for Meteosat-only events
- * happen in scoreEvent() below, since that's the pass every event already
- * flows through here.
+ * Meteosat/SLSTR fusion (locked rules a-e, see the feature's commit/PR
+ * notes, extended to SLSTR by this feature): a secondary (Meteosat or
+ * SLSTR) detection always joins at ITS OWN reported radius
+ * (secondaryDetectionRadiusKm — real Meteosat values run ~1.1-1.9km, SLSTR
+ * uses its fixed ~1km fallback), whether the match is VIIRS-anchored (rule
+ * a: attaches as a pass, never moves the position) or secondary-only (rule
+ * b: position is the mean of whichever secondary detections are present,
+ * possibly a mix of both sources). A VIIRS detection joins at the normal
+ * 2km radius against a VIIRS-anchored event, but widens to the TARGET
+ * secondary-only event's own positionUncertaintyKm specifically to catch
+ * (and re-anchor, rule d) it — so a wide-footprint secondary detection is
+ * easier to re-anchor than a tight one, honestly reflecting its real
+ * uncertainty. Status capping and the 2-pass/~30min (or cross-sensor)
+ * alert gate for secondary-only events happen in scoreEvent() below, since
+ * that's the pass every event already flows through here.
  */
 export function clusterDetections(detections: Detection[], events: FireEvent[], frpThresholdMw = DEFAULT_FRP_THRESHOLD_MW): FireEvent[] {
   for (const det of detections) {
-    if (isMeteosatDetection(det)) {
-      joinDetection(det, events, () => meteosatDetectionRadiusKm(det));
+    if (isSecondaryDetection(det)) {
+      joinDetection(det, events, () => secondaryDetectionRadiusKm(det));
     } else {
       joinDetection(det, events, ev => eventHasViirs(ev) ? CLUSTER_RADIUS_KM : (ev.positionUncertaintyKm ?? METEOSAT_POSITION_UNCERTAINTY_KM));
     }
@@ -445,29 +506,47 @@ function mergeEvents(a: FireEvent, b: FireEvent): FireEvent {
  * adjacent pixels from the SAME single pass mean the fire is big, not that
  * it's confirmed — that's scored separately, honestly labelled as size.
  */
-function meteosatDetectionSpanMinutes(dets: Detection[]): number {
+function secondaryDetectionSpanMinutes(dets: Detection[]): number {
   const times = [...new Set(dets.map(d => d.acquiredAt))].map(t => new Date(t).getTime());
   if (times.length < 2) return 0;
   return (Math.max(...times) - Math.min(...times)) / 60_000;
 }
 
-// Rule (e), locked: a Meteosat-only event can only ever reach 'corroborated'
-// (never 'urgent') once at least METEOSAT_ALERT_MIN_DETECTIONS distinct
-// passes have hit the same spot at least METEOSAT_ALERT_MIN_SPAN_MIN apart —
-// several circles from the very same 10-minute frame don't count, since
-// that's the same single overpass, not a recurring signal.
-function meetsMeteosatAlertGate(meteosatDets: Detection[]): boolean {
-  const distinctPassTimes = new Set(meteosatDets.map(d => d.acquiredAt)).size;
-  return distinctPassTimes >= METEOSAT_ALERT_MIN_DETECTIONS && meteosatDetectionSpanMinutes(meteosatDets) >= METEOSAT_ALERT_MIN_SPAN_MIN;
+// Rule (e)/(c), locked and extended to SLSTR: a secondary-only (Meteosat-
+// only, SLSTR-only, or a Meteosat+SLSTR mix with no VIIRS) event can only
+// ever reach 'corroborated' (never 'urgent') once EITHER (a) at least
+// SECONDARY_ALERT_MIN_DETECTIONS distinct passes have hit the same spot at
+// least SECONDARY_ALERT_MIN_SPAN_MIN apart — several circles/pixels from the
+// very same overpass don't count, since that's one single pass, not a
+// recurring signal — OR (b) the event has been hit by >=2 DIFFERENT secondary
+// instruments (Meteosat AND SLSTR both), a strictly stronger claim
+// (independent-sensor corroboration) than repeat passes from one sensor, so
+// it clears the gate without needing the pass-count/span check too.
+function meetsSecondaryAlertGate(secondaryDets: Detection[]): boolean {
+  const distinctInstruments = new Set(secondaryDets.map(d => d.instrument)).size;
+  if (distinctInstruments >= 2) return true;
+  const distinctPassTimes = new Set(secondaryDets.map(d => d.acquiredAt)).size;
+  return distinctPassTimes >= SECONDARY_ALERT_MIN_DETECTIONS && secondaryDetectionSpanMinutes(secondaryDets) >= SECONDARY_ALERT_MIN_SPAN_MIN;
 }
 
 // Villages within `radiusKm` of a point, ignoring wind — used only for the
-// Meteosat-only alert gate (rule e), which has no wind/weather enrichment to
-// work with (that only runs for score>=55, and a Meteosat-only event's score
-// never carries real FRP/confidence). A plain distance check is the correct,
-// honest substitute: "is there anyone to warn nearby", not "who's downwind".
+// secondary-only alert gate (rule e), which has no wind/weather enrichment
+// to work with (that only runs for score>=55, and a Meteosat-only event's
+// score never carries real FRP/confidence — an SLSTR-only event's can, but
+// enrichment still gates on score/eligibility in route.ts, not here). A
+// plain distance check is the correct, honest substitute: "is there anyone
+// to warn nearby", not "who's downwind".
 export function hasNearbyVillage(point: { latitude: number; longitude: number }, radiusKm: number): boolean {
   return villages.some(v => distanceKm(point.latitude, point.longitude, v.lat, v.lon) <= radiusKm);
+}
+
+// "NASA FIRMS", "EUMETSAT MTG", "Copernicus Sentinel-3 SLSTR" — combined
+// with " + " in whichever mix of sources actually contributed to this
+// event, VIIRS's own name always first when present.
+function sourceLabelFor(hasViirs: boolean, hasMeteosat: boolean, hasSlstr: boolean): string {
+  const secondaryNames = [hasMeteosat ? 'EUMETSAT MTG' : null, hasSlstr ? 'Copernicus Sentinel-3 SLSTR' : null].filter((n): n is string => n !== null);
+  if (!hasViirs) return secondaryNames.join(' + ') || 'EUMETSAT MTG'; // unreachable in practice — an event always has >=1 detection
+  return secondaryNames.length ? `NASA FIRMS + ${secondaryNames.join(' + ')}` : 'NASA FIRMS';
 }
 
 function scoreEvent(event: FireEvent, frpThresholdMw = DEFAULT_FRP_THRESHOLD_MW): FireEvent {
@@ -478,16 +557,33 @@ function scoreEvent(event: FireEvent, frpThresholdMw = DEFAULT_FRP_THRESHOLD_MW)
   }
   const passCount = passKeys.size;
   const maxPixelsInSinglePass = Math.max(...passKeys.values());
+  // Max-not-average across sensors, deliberately: a real per-detection FRP
+  // (VIIRS or SLSTR) always wins over Meteosat's placeholder 0, and the
+  // larger of two real readings wins over the smaller — Math.max over every
+  // detection's frp already does this correctly with no extra branching.
   const maxFrp = Math.max(...event.detections.map(d => d.frp));
   const maxConfidence = event.detections.reduce((best, d) => confidenceRank(d.confidence) > confidenceRank(best) ? d.confidence : best, event.detections[0].confidence);
 
   const meteosatDets = event.detections.filter(isMeteosatDetection);
-  const hasViirs = meteosatDets.length < event.detections.length;
+  const slstrDets = event.detections.filter(isSlstrDetection);
+  const secondaryDets = [...meteosatDets, ...slstrDets];
+  const hasViirs = secondaryDets.length < event.detections.length;
   // MTG's CAP product carries no per-detection FRP or confidence (unlike
-  // VIIRS) — maxFrp/maxConfidence above naturally stay whatever the VIIRS
-  // detections already established (Meteosat rows are frp:0, confidence:''),
-  // so nothing here needs to special-case them away.
-  const sourceLabel = !hasViirs ? 'EUMETSAT MTG' : meteosatDets.length > 0 ? 'NASA FIRMS + EUMETSAT MTG' : 'NASA FIRMS';
+  // VIIRS) — maxFrp/maxConfidence above naturally stay whatever the VIIRS/
+  // SLSTR detections already established (Meteosat rows are frp:0,
+  // confidence:''), so nothing here needs to special-case them away.
+  const sourceLabel = sourceLabelFor(hasViirs, meteosatDets.length > 0, slstrDets.length > 0);
+
+  // Rule (a)/(b), logged: SLSTR carries a real FRP, unlike Meteosat — when
+  // it's present alongside another real-FRP source (VIIRS) or alongside a
+  // Meteosat-only event (whose own frp is always 0, so SLSTR's real value
+  // naturally becomes/ties the max above), log both readings so the
+  // max-not-average choice is auditable, not silent.
+  if (slstrDets.length > 0 && (hasViirs || meteosatDets.length > 0)) {
+    const otherMax = Math.max(...event.detections.filter(d => !isSlstrDetection(d)).map(d => d.frp));
+    const slstrMax = Math.max(...slstrDets.map(d => d.frp));
+    console.log(`event ${event.id}: FRP max-not-average — other sensor(s) ${otherMax.toFixed(1)}MW, SLSTR ${slstrMax.toFixed(1)}MW, using max ${maxFrp.toFixed(1)}MW`);
+  }
 
   const evidence: string[] = [`${sourceLabel} · ${event.detections.length} pixel(s) sur ${passCount} passage(s)`];
   const evidenceShort: string[] = [`${passCount}pass`];
@@ -500,7 +596,11 @@ function scoreEvent(event: FireEvent, frpThresholdMw = DEFAULT_FRP_THRESHOLD_MW)
   // self-hoster who lowers the threshold for a region with smaller/faster
   // fires gets a correspondingly lower whole ladder, not just the top rung.
   if (maxFrp >= frpThresholdMw) score += 20; else if (maxFrp >= frpThresholdMw * 0.4) score += 12; else if (maxFrp >= frpThresholdMw * 0.15) score += 5;
-  if (hasViirs) evidence.push(`Puissance radiative max ${maxFrp.toFixed(1)} MW`);
+  // hasRealFrp: VIIRS always carries a real reading; SLSTR does too (unlike
+  // Meteosat, always 0) — so a lone SLSTR-only event's real FRP is shown,
+  // not silently withheld the way Meteosat-only's fabricated-looking 0 is.
+  const hasRealFrp = hasViirs || slstrDets.length > 0;
+  if (hasRealFrp) evidence.push(`Puissance radiative max ${maxFrp.toFixed(1)} MW`);
   if (maxPixelsInSinglePass >= 3) { score += 10; evidence.push(`Feu étendu · ${maxPixelsInSinglePass} pixels dans un même passage (taille, pas confirmation)`); evidenceShort.push(`taille×${maxPixelsInSinglePass}`); }
   if (passCount > 1) { score += 25; evidence.push(`Recoupé par un passage/capteur différent (${passCount} passages distincts)`); evidenceShort.push('recoupé'); }
   if (event.latitude >= 34 && event.latitude <= 37.5) { score += 5; evidence.push('Bande nord à végétation sensible'); }
@@ -527,20 +627,34 @@ function scoreEvent(event: FireEvent, frpThresholdMw = DEFAULT_FRP_THRESHOLD_MW)
     score += EARLY_DETECTION_METEOSAT_PERSISTENCE_BOOST;
     evidence.push(`Corroboré par Meteosat (${meteosatPassCount} passages)`); evidenceShort.push('meteosat+');
   }
+  // Détection précoce, signal 3b (SLSTR persistence): same shape as signal 3,
+  // keyed on SLSTR passes — independent-sensor persistence, so this stacks
+  // additively with signal 3 above when an event genuinely qualifies for
+  // both (naturally handled: each checks only its own instrument's passes,
+  // neither reads or depends on the other's count).
+  const slstrPassCount = new Set(slstrDets.map(d => d.acquiredAt)).size;
+  if (hasViirs && slstrPassCount >= EARLY_DETECTION_SLSTR_PERSISTENCE_MIN_PASSES) {
+    score += EARLY_DETECTION_SLSTR_PERSISTENCE_BOOST;
+    evidence.push(`Corroboré par Sentinel-3 SLSTR (${slstrPassCount} passages)`); evidenceShort.push('slstr+');
+  }
   score = Math.min(score, 100);
 
   let status: FireEvent['status'] = score >= 85 ? 'urgent' : score >= 65 ? 'corroborated' : 'observation';
-  if (!hasViirs) status = meetsMeteosatAlertGate(meteosatDets) ? 'corroborated' : 'observation';
+  if (!hasViirs) status = meetsSecondaryAlertGate(secondaryDets) ? 'corroborated' : 'observation';
 
-  // Real per-detection radius (CAP-reported, ~1.1-1.9km observed live) wins
-  // over the flat fallback — the largest among this event's Meteosat
-  // detections, since the uncertainty a village-proximity check should
-  // respect is the worst case actually involved, not the smallest.
-  const positionUncertaintyKm = hasViirs ? undefined : Math.max(...meteosatDets.map(meteosatDetectionRadiusKm));
+  // Real per-detection radius (Meteosat's CAP-reported value, ~1.1-1.9km
+  // observed live; SLSTR's fixed ~1km fallback) wins over the flat fallback
+  // — the largest among this event's secondary detections, since the
+  // uncertainty a village-proximity check should respect is the worst case
+  // actually involved, not the smallest.
+  const positionUncertaintyKm = hasViirs ? undefined : Math.max(...secondaryDets.map(secondaryDetectionRadiusKm));
 
   return {
     ...event, maxFrp, maxConfidence, passCount, maxPixelsInSinglePass, score, evidence, evidenceShort, status,
-    positionSource: hasViirs ? 'viirs' : 'meteosat',
+    // 'slstr' wins over 'meteosat' when both non-VIIRS sources are present
+    // without VIIRS — SLSTR's ~1km footprint is the more informative label
+    // (see FireEvent.positionSource's own comment above).
+    positionSource: hasViirs ? 'viirs' : slstrDets.length > 0 ? 'slstr' : 'meteosat',
     positionUncertaintyKm,
     geoTracked: hasViirs && meteosatDets.length > 0,
   };
@@ -585,13 +699,15 @@ function applyWeather(event: FireEvent, humidity?: number, windKph?: number, win
   if (humidity !== undefined && humidity < 30) { score += 5; evidence.push(`Air sec · ${humidity}% HR`); }
   if (windKph !== undefined && windKph >= 25) { score += 5; evidence.push(`Vent soutenu · ${windKph} km/h`); }
   score = Math.min(score, 100);
-  // Rule (e), locked: a Meteosat-only event's status is the 2-pass/~30min
-  // gate (meetsMeteosatAlertGate in scoreEvent()), never the score ladder —
-  // its score can't carry real FRP/confidence, so the plain
-  // score>=65/85 bands below would near-permanently read it back down to
-  // 'observation' the instant weather enrichment recomputes status here,
-  // silently defeating shouldAlert's meteosat branch right after
-  // clusterDetections() had correctly set 'corroborated'.
+  // Rule (e), locked, extended to SLSTR: a secondary-only (Meteosat-only,
+  // SLSTR-only, or a mix) event's status is the meetsSecondaryAlertGate()
+  // gate in scoreEvent(), never the score ladder — a Meteosat-only event's
+  // score can't carry real FRP/confidence at all, so the plain score>=65/85
+  // bands below would near-permanently read it back down to 'observation'
+  // the instant weather enrichment recomputes status here, silently
+  // defeating shouldAlert's secondary branch right after clusterDetections()
+  // had correctly set 'corroborated'. (An SLSTR-only event's score CAN carry
+  // real FRP, but the same gate applies for consistency — see rule c.)
   const status: FireEvent['status'] = eventHasViirs(event)
     ? (score >= 85 ? 'urgent' : score >= 65 ? 'corroborated' : 'observation')
     : event.status;
@@ -806,6 +922,8 @@ function evidenceClauses(event: FireEvent): string[] {
       clauses.push('confirmé par un passage satellite supplémentaire');
     } else if (tag === 'meteosat+') {
       clauses.push('confirmé par Meteosat');
+    } else if (tag === 'slstr+') {
+      clauses.push('confirmé par Sentinel-3 SLSTR');
     } else if (tag === 'anomalie') {
       clauses.push('intensité nettement supérieure à la normale locale');
     }
@@ -823,11 +941,16 @@ export function evidenceLine(event: FireEvent): string {
 }
 
 // The credits line — appends the Meteosat/EUMETSAT credit only when this
-// event actually carries a Meteosat pass; otherwise unchanged. Same template
-// for telegramText() and the dashboard detail, no separate logic path.
+// event actually carries a Meteosat pass, and/or the Copernicus Sentinel-3
+// SLSTR credit only when it carries an SLSTR pass; otherwise unchanged. Same
+// template for telegramText() and the dashboard detail, no separate logic path.
 export function creditsLine(event: FireEvent): string {
   const hasMeteosatPass = event.detections.some(isMeteosatDetection);
-  return hasMeteosatPass ? 'NASA FIRMS·Open-Meteo·MTG Active Fire Monitoring — EUMETSAT' : 'NASA FIRMS·Open-Meteo';
+  const hasSlstrPass = event.detections.some(isSlstrDetection);
+  const parts = ['NASA FIRMS·Open-Meteo'];
+  if (hasMeteosatPass) parts.push('MTG Active Fire Monitoring — EUMETSAT');
+  if (hasSlstrPass) parts.push('Copernicus Sentinel-3 SLSTR');
+  return parts.join('·');
 }
 
 export function telegramText(event: FireEvent, referenceTime = new Date(), proximityKm = DEFAULT_PROXIMITY_KM) {
@@ -859,10 +982,21 @@ export function telegramText(event: FireEvent, referenceTime = new Date(), proxi
   const meteosatOnlyBit = event.positionSource === 'meteosat'
     ? `🛰 Signal géostationnaire Meteosat — position approximative (±${(event.positionUncertaintyKm ?? METEOSAT_POSITION_UNCERTAINTY_KM).toFixed(1)} km), non confirmé par satellite polaire\n\n`
     : '';
+  // SLSTR fusion (rule c, same shape as Meteosat's line above but honestly
+  // different wording: SLSTR IS a polar sensor like VIIRS, so the caveat is
+  // "not yet corroborated by VIIRS", not "not confirmed by a polar pass".
+  const slstrOnlyBit = event.positionSource === 'slstr'
+    ? `🛰 Signal Sentinel-3 SLSTR — position approximative (±${(event.positionUncertaintyKm ?? SLSTR_POSITION_UNCERTAINTY_KM).toFixed(1)} km), non corroboré par VIIRS\n\n`
+    : '';
   const geoTrackedBit = event.geoTracked ? `🛰 Suivi Meteosat actif (toutes les ${METEOSAT_CADENCE_MIN} min)\n\n` : '';
 
-  const lastIsMeteosat = isMeteosatDetection(event.detections[event.detections.length - 1]);
-  const frpBit = lastIsMeteosat ? '' : ` · puissance détectée : ${event.maxFrp.toFixed(1)} MW`;
+  const lastDetection = event.detections[event.detections.length - 1];
+  const lastIsMeteosat = isMeteosatDetection(lastDetection);
+  const lastIsSlstr = isSlstrDetection(lastDetection);
+  // Rule locked (Step 4): when the FRP shown came from SLSTR rather than
+  // VIIRS, say so plainly in the line itself rather than leaving the reader
+  // to guess which sensor measured it.
+  const frpBit = lastIsMeteosat ? '' : lastIsSlstr ? ` · puissance détectée (Sentinel-3) : ${event.maxFrp.toFixed(1)} MW` : ` · puissance détectée : ${event.maxFrp.toFixed(1)} MW`;
 
-  return `${icon} ${LABELS.headline} — À VÉRIFIER\n\n${meteosatOnlyBit}${geoTrackedBit}${industrialBit}${villageLines}\n\n📍${event.latitude.toFixed(4)},${event.longitude.toFixed(4)}${locationBit} ${algiersTime(event.lastAcquiredAt)} (Alger, il y a ${formatElapsed(ageMin)}) · ${event.detections[event.detections.length - 1].instrument}${frpBit}\nPreuves : ${evidenceLine(event)}\n\n⚠️${LABELS.disclaimer}\n${creditsLine(event)}`;
+  return `${icon} ${LABELS.headline} — À VÉRIFIER\n\n${meteosatOnlyBit}${slstrOnlyBit}${geoTrackedBit}${industrialBit}${villageLines}\n\n📍${event.latitude.toFixed(4)},${event.longitude.toFixed(4)}${locationBit} ${algiersTime(event.lastAcquiredAt)} (Alger, il y a ${formatElapsed(ageMin)}) · ${lastDetection.instrument}${frpBit}\nPreuves : ${evidenceLine(event)}\n\n⚠️${LABELS.disclaimer}\n${creditsLine(event)}`;
 }

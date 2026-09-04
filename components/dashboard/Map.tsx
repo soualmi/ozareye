@@ -36,17 +36,21 @@ function escapeHtml(s: string) {
   return s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 }
 
-// positionSource 'meteosat' (rule c/e, locked): a hollow/dashed circle
+// positionSource 'meteosat'/'slstr' (rule c/e, locked): a hollow circle
 // instead of a filled one — visually distinct at a glance from a
-// VIIRS-anchored marker, since this position carries a real ~3km
-// uncertainty and has never been corroborated by a polar overpass. The
-// faint uncertainty ring itself is drawn separately, see DashboardMap below.
+// VIIRS-anchored marker, since this position carries real uncertainty and
+// has never been corroborated by a polar overpass (Meteosat) or by VIIRS
+// specifically (SLSTR). Meteosat uses a dashed border, SLSTR a dotted one —
+// distinct at a glance from each other too. The faint uncertainty ring
+// itself is drawn separately, see DashboardMap below.
 function fireIcon(status: DashboardEvent['status'], frp: number, selected: boolean, label: string, positionSource: DashboardEvent['positionSource']) {
   const color = status === 'urgent' ? '#ff5b32' : status === 'corroborated' ? '#f5b942' : '#63dda0';
   const size = Math.min(34, Math.max(14, 10 + Math.sqrt(frp) * 2));
   const ring = selected ? `box-shadow:0 0 0 3px #fff, 0 0 0 5px ${color};` : '';
   const safe = escapeHtml(label);
-  const fill = positionSource === 'meteosat' ? `background:transparent;border:3px dashed ${color};` : `background:${color};`;
+  const fill = positionSource === 'meteosat' ? `background:transparent;border:3px dashed ${color};`
+    : positionSource === 'slstr' ? `background:transparent;border:3px dotted ${color};`
+    : `background:${color};`;
   return L.divIcon({
     className: '', html: `<div role="img" aria-label="${safe}" title="${safe}" style="width:${size}px;height:${size}px;border-radius:50%;${fill}opacity:.9;${ring}"></div>`,
     iconSize: [size, size], iconAnchor: [size / 2, size / 2],
@@ -147,6 +151,9 @@ function FirePopup({ event, onDetail }: { event: DashboardEvent; onDetail: (id: 
       {event.positionSource === 'meteosat' && (
         <div style={{ marginTop: 4, color: '#8da79d' }}>🛰 Position approximative Meteosat (±{(event.positionUncertaintyKm ?? 3).toFixed(1)}km), non confirmé par satellite polaire</div>
       )}
+      {event.positionSource === 'slstr' && (
+        <div style={{ marginTop: 4, color: '#8da79d' }}>🛰 Position approximative Sentinel-3 SLSTR (±{(event.positionUncertaintyKm ?? 1).toFixed(1)}km), non corroboré par VIIRS</div>
+      )}
       {event.geoTracked && <div style={{ marginTop: 4, color: '#4fa3ff' }}>🛰 Suivi Meteosat actif</div>}
       <div>{[nearest, wilayaLabel(event.wilaya)].filter(Boolean).join(' · ')}</div>
       <div>{capitalize(magnitudeShort)}</div>
@@ -206,6 +213,17 @@ export default function DashboardMap({ events, selectedId, onSelect, onDetail }:
           center={[ev.latitude, ev.longitude]}
           radius={(ev.positionUncertaintyKm ?? 3) * 1000}
           pathOptions={{ color: '#8da79d', weight: 1, fillColor: '#8da79d', fillOpacity: 0.06, dashArray: '3 5' }}
+        />
+      ))}
+      {/* Same idea for an SLSTR-only position — a finer dash pattern and its
+          own (typically ~1km, smaller) real radius keep it visually distinct
+          from Meteosat's ring even where the two overlap on screen. */}
+      {events.filter(ev => ev.positionSource === 'slstr').map(ev => (
+        <Circle
+          key={`unc-${ev.id}`}
+          center={[ev.latitude, ev.longitude]}
+          radius={(ev.positionUncertaintyKm ?? 1) * 1000}
+          pathOptions={{ color: '#4fa3ff', weight: 1, fillColor: '#4fa3ff', fillOpacity: 0.06, dashArray: '1 3' }}
         />
       ))}
 
