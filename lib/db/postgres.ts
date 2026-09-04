@@ -117,6 +117,7 @@ export function createPostgresBackend(connectionString: string): Backend {
         incident_open_since TEXT,
         last_notified_at TEXT
       )`;
+      await sql`CREATE TABLE IF NOT EXISTS ingest_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`;
     },
 
     // The upsert the whole de-dup fix depends on — Postgres's native
@@ -228,6 +229,16 @@ export function createPostgresBackend(connectionString: string): Backend {
         VALUES (${row.source}, ${row.consecutiveFailures}, ${row.lastSuccessAt}, ${row.lastFailureAt}, ${row.lastError}, ${row.incidentOpenSince}, ${row.lastNotifiedAt})
         ON CONFLICT (source) DO UPDATE SET consecutive_failures = EXCLUDED.consecutive_failures, last_success_at = EXCLUDED.last_success_at,
           last_failure_at = EXCLUDED.last_failure_at, last_error = EXCLUDED.last_error, incident_open_since = EXCLUDED.incident_open_since, last_notified_at = EXCLUDED.last_notified_at`;
+    },
+
+    async getIngestState(key: string) {
+      const rows = await sql`SELECT value FROM ingest_state WHERE key = ${key}` as { value: string }[];
+      return rows[0]?.value ?? null;
+    },
+
+    async setIngestState(key: string, value: string) {
+      await sql`INSERT INTO ingest_state (key, value, updated_at) VALUES (${key}, ${value}, ${new Date().toISOString()})
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`;
     },
   };
 }

@@ -84,6 +84,12 @@ export interface Backend {
   updateConfig(patch: ConfigPatch): Promise<EngineConfig>;
   getSourceHealth(source: string): Promise<SourceHealthRow | undefined>;
   upsertSourceHealth(row: SourceHealthRow): Promise<void>;
+  // Small free-form cursor store — today just the Meteosat ingest "since"
+  // timestamp (lib/meteosat.ts), keyed by an arbitrary string like
+  // source_health above, so a second pull-based source tomorrow doesn't need
+  // a schema change either.
+  getIngestState(key: string): Promise<string | null>;
+  setIngestState(key: string, value: string): Promise<void>;
 }
 
 // The values this instance already shipped and ran with before /setup or

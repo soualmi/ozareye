@@ -63,6 +63,10 @@ const CREATE_SOURCE_HEALTH_TABLE = `CREATE TABLE IF NOT EXISTS source_health (
   last_notified_at TEXT
 )`;
 
+// Small key/value cursor store — today just Meteosat's ingest "since"
+// timestamp (lib/meteosat.ts).
+const CREATE_INGEST_STATE_TABLE = `CREATE TABLE IF NOT EXISTS ingest_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`;
+
 // Single-row table (id is always 1) holding the one region/tunables record
 // this instance runs with — set up via /setup, read by app/api/monitor/route.ts
 // on every run instead of the old hardcoded constants. The three secrets
@@ -135,7 +139,7 @@ function dbRowToSourceHealth(row: SourceHealthDbRow): SourceHealthRow {
 export function createSqliteBackend(): Backend {
   return {
     async initDb() {
-      db().exec(CREATE_TABLE); db().exec(CREATE_INDEX); db().exec(CREATE_HOTSPOT_TABLE); db().exec(CREATE_CONFIG_TABLE); db().exec(CREATE_SOURCE_HEALTH_TABLE);
+      db().exec(CREATE_TABLE); db().exec(CREATE_INDEX); db().exec(CREATE_HOTSPOT_TABLE); db().exec(CREATE_CONFIG_TABLE); db().exec(CREATE_SOURCE_HEALTH_TABLE); db().exec(CREATE_INGEST_STATE_TABLE);
     },
 
     // The upsert the whole de-dup fix depends on: SQLite's ON CONFLICT(id) DO
@@ -253,6 +257,17 @@ export function createSqliteBackend(): Backend {
           source: row.source, consecutiveFailures: row.consecutiveFailures, lastSuccessAt: row.lastSuccessAt,
           lastFailureAt: row.lastFailureAt, lastError: row.lastError, incidentOpenSince: row.incidentOpenSince, lastNotifiedAt: row.lastNotifiedAt,
         });
+    },
+
+    async getIngestState(key: string) {
+      const row = db().prepare('SELECT value FROM ingest_state WHERE key = ?').get(key) as { value: string } | undefined;
+      return row?.value ?? null;
+    },
+
+    async setIngestState(key: string, value: string) {
+      db().prepare(`INSERT INTO ingest_state (key, value, updated_at) VALUES (@key, @value, @updatedAt)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`)
+        .run({ key, value, updatedAt: new Date().toISOString() });
     },
   };
 }

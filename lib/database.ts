@@ -64,3 +64,5 @@ export async function getConfig() { return (await backend()).getConfig(); }
 export async function updateConfig(patch: ConfigPatch) { return (await backend()).updateConfig(patch); }
 export async function getSourceHealth(source: string) { return (await backend()).getSourceHealth(source); }
 export async function upsertSourceHealth(row: SourceHealthRow) { return (await backend()).upsertSourceHealth(row); }
+export async function getIngestState(key: string) { return (await backend()).getIngestState(key); }
+export async function setIngestState(key: string, value: string) { return (await backend()).setIngestState(key, value); }
