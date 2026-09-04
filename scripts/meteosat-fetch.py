@@ -93,6 +93,10 @@ def find_cap_entry(product):
 
 
 def parse_cap_circles(xml_bytes, bbox):
+    # CAP 1.1's <circle> is "lat,lon radius" with radius in kilometers (the
+    # OASIS CAP spec's own unit for a WGS84 circle) — confirmed against live
+    # product samples: real values run ~1.1-1.9km, close to FCI's ~2km pixel,
+    # not the flat 3km this project used to hardcode everywhere downstream.
     west, south, east, north = bbox
     root = ET.fromstring(xml_bytes)
     detections = []
@@ -101,14 +105,14 @@ def parse_cap_circles(xml_bytes, bbox):
         if not text:
             continue
         try:
-            latlon, _radius = text.split(' ')
+            latlon, radius_str = text.split(' ')
             lat_str, lon_str = latlon.split(',')
-            lat, lon = float(lat_str), float(lon_str)
+            lat, lon, radius_km = float(lat_str), float(lon_str), float(radius_str)
         except ValueError:
             continue
         if not (west <= lon <= east and south <= lat <= north):
             continue
-        detections.append({'lat': lat, 'lon': lon})
+        detections.append({'lat': lat, 'lon': lon, 'radius_km': radius_km})
     return detections
 
 
@@ -150,6 +154,7 @@ def main():
         for det in parse_cap_circles(xml_bytes, bbox):
             print(json.dumps({
                 'lat': det['lat'], 'lon': det['lon'],
+                'radius_km': det['radius_km'],
                 'frp_or_intensity': None,  # not carried by this product — see module docstring
                 'confidence': None,
                 'acquired_at': acquired_at,

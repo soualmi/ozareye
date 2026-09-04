@@ -145,7 +145,7 @@ function FirePopup({ event, onDetail }: { event: DashboardEvent; onDetail: (id: 
           fix as the detail panel, not a note trailing at the bottom. */}
       {event.industrialLeadLine && <div style={{ marginTop: 4, color: '#f5b942' }}>🏭 {event.industrialLeadLine}</div>}
       {event.positionSource === 'meteosat' && (
-        <div style={{ marginTop: 4, color: '#8da79d' }}>🛰 Position approximative Meteosat (±{event.positionUncertaintyKm ?? 3}km), non confirmé par satellite polaire</div>
+        <div style={{ marginTop: 4, color: '#8da79d' }}>🛰 Position approximative Meteosat (±{(event.positionUncertaintyKm ?? 3).toFixed(1)}km), non confirmé par satellite polaire</div>
       )}
       {event.geoTracked && <div style={{ marginTop: 4, color: '#4fa3ff' }}>🛰 Suivi Meteosat actif</div>}
       <div>{[nearest, wilayaLabel(event.wilaya)].filter(Boolean).join(' · ')}</div>

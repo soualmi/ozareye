@@ -40,14 +40,21 @@ const DEFAULT_LOOKBACK_MIN = 20;
 
 export type MeteosatResult = { source: typeof MTG_SOURCE; detections: Detection[]; ok: boolean; error?: string };
 
-type RawRow = { lat: number; lon: number; acquired_at: string; frp_or_intensity: number | null; confidence: string | null };
+type RawRow = { lat: number; lon: number; acquired_at: string; frp_or_intensity: number | null; confidence: string | null; radius_km?: number | null };
 
 function rowToDetection(row: RawRow): Detection {
   // This product carries no per-detection FRP or confidence (see
   // scripts/meteosat-fetch.py's module docstring) — frp:0/confidence:''
   // are the same "no signal" values confidenceRank()/scoreEvent() already
-  // treat as the bottom rank, not a fabricated reading.
-  return { latitude: row.lat, longitude: row.lon, acquiredAt: row.acquired_at, satellite: 'MTI1', instrument: 'FCI', confidence: row.confidence ?? '', frp: row.frp_or_intensity ?? 0 };
+  // treat as the bottom rank, not a fabricated reading. radiusKm, when
+  // present, IS a real per-detection value (the CAP circle's own reported
+  // radius) — scoreEvent() uses it as this event's positionUncertaintyKm
+  // instead of the flat 3km fallback (lib/fire-monitor.ts).
+  return {
+    latitude: row.lat, longitude: row.lon, acquiredAt: row.acquired_at, satellite: 'MTI1', instrument: 'FCI',
+    confidence: row.confidence ?? '', frp: row.frp_or_intensity ?? 0,
+    radiusKm: row.radius_km ?? undefined,
+  };
 }
 
 export async function fetchMeteosatSlots(bbox: { west: number; south: number; east: number; north: number }): Promise<MeteosatResult> {

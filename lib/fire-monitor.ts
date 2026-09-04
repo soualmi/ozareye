@@ -30,6 +30,11 @@ export function eventWilaya(event: Pick<FireEvent, 'latitude' | 'longitude'>): s
 export type Detection = {
   latitude: number; longitude: number; acquiredAt: string;
   satellite: string; instrument: string; confidence: string; frp: number;
+  // Meteosat only — the CAP circle's own reported detection radius (km),
+  // when the product provided one. Falls back to
+  // METEOSAT_POSITION_UNCERTAINTY_KM below when absent (a malformed/legacy
+  // CAP entry) — never fabricated as a real reading.
+  radiusKm?: number;
 };
 
 export type VillageExposure = {
@@ -124,11 +129,19 @@ const METEOSAT_INSTRUMENT = 'FCI';
 export function isMeteosatDetection(d: Detection): boolean {
   return d.instrument === METEOSAT_INSTRUMENT;
 }
-// FCI's Active Fire Monitoring pixel is ~2km at nadir; 3km is the round,
-// slightly conservative figure this project quotes for the position
-// uncertainty and the widened proximity/join radius (rules a-e) alike.
+// Fallback only — real detections carry their own CAP-reported radius
+// (~1.1-1.9km observed live, close to FCI's ~2km nadir pixel). This flat
+// figure is used only when a detection has none (a malformed/legacy CAP
+// entry), not as the everyday value.
 export const METEOSAT_POSITION_UNCERTAINTY_KM = 3;
-const METEOSAT_JOIN_RADIUS_KM = METEOSAT_POSITION_UNCERTAINTY_KM;
+
+// The radius to treat a single Meteosat detection as covering: its own
+// CAP-reported value when present, the flat fallback otherwise. Every join/
+// uncertainty/widened-proximity computation below goes through this rather
+// than the constant directly, so a real per-detection radius always wins.
+function meteosatDetectionRadiusKm(det: Detection): number {
+  return det.radiusKm && det.radiusKm > 0 ? det.radiusKm : METEOSAT_POSITION_UNCERTAINTY_KM;
+}
 // Real measured cadence (see the product inspection this feature shipped
 // with): every 10 minutes, not the 15 originally assumed. Shown verbatim in
 // the "suivi Meteosat" copy below.
@@ -319,21 +332,25 @@ function joinDetection(det: Detection, events: FireEvent[], joinRadiusForEvent: 
  * downstream alerting fires once per event, not once per pixel.
  *
  * Meteosat fusion (locked rules a-e, see the feature's commit/PR notes):
- * VIIRS detections join at the normal 2km radius against a VIIRS-anchored
- * event, but widen to 3km specifically to catch (and re-anchor, rule d) a
- * Meteosat-only event. Meteosat detections always join at the 3km pixel-
- * uncertainty radius, whether the match is VIIRS-anchored (rule a: attaches
- * as a pass, never moves the position) or Meteosat-only (rule b: position is
- * the mean of Meteosat detections). Status capping and the 2-pass/~30min
- * alert gate for Meteosat-only events happen in scoreEvent() below, since
- * that's the pass every event already flows through here.
+ * a Meteosat detection always joins at ITS OWN CAP-reported radius
+ * (meteosatDetectionRadiusKm — real values run ~1.1-1.9km, not a flat
+ * figure), whether the match is VIIRS-anchored (rule a: attaches as a pass,
+ * never moves the position) or Meteosat-only (rule b: position is the mean
+ * of Meteosat detections). A VIIRS detection joins at the normal 2km radius
+ * against a VIIRS-anchored event, but widens to the TARGET Meteosat-only
+ * event's own positionUncertaintyKm specifically to catch (and re-anchor,
+ * rule d) it — so a wide-footprint Meteosat detection is easier to
+ * re-anchor than a tight one, honestly reflecting its real uncertainty.
+ * Status capping and the 2-pass/~30min alert gate for Meteosat-only events
+ * happen in scoreEvent() below, since that's the pass every event already
+ * flows through here.
  */
 export function clusterDetections(detections: Detection[], events: FireEvent[], frpThresholdMw = DEFAULT_FRP_THRESHOLD_MW): FireEvent[] {
   for (const det of detections) {
     if (isMeteosatDetection(det)) {
-      joinDetection(det, events, () => METEOSAT_JOIN_RADIUS_KM);
+      joinDetection(det, events, () => meteosatDetectionRadiusKm(det));
     } else {
-      joinDetection(det, events, ev => eventHasViirs(ev) ? CLUSTER_RADIUS_KM : METEOSAT_JOIN_RADIUS_KM);
+      joinDetection(det, events, ev => eventHasViirs(ev) ? CLUSTER_RADIUS_KM : (ev.positionUncertaintyKm ?? METEOSAT_POSITION_UNCERTAINTY_KM));
     }
   }
   return mergeById(events).map(ev => scoreEvent(ev, frpThresholdMw));
@@ -440,10 +457,16 @@ function scoreEvent(event: FireEvent, frpThresholdMw = DEFAULT_FRP_THRESHOLD_MW)
   let status: FireEvent['status'] = score >= 85 ? 'urgent' : score >= 65 ? 'corroborated' : 'observation';
   if (!hasViirs) status = meetsMeteosatAlertGate(meteosatDets) ? 'corroborated' : 'observation';
 
+  // Real per-detection radius (CAP-reported, ~1.1-1.9km observed live) wins
+  // over the flat fallback — the largest among this event's Meteosat
+  // detections, since the uncertainty a village-proximity check should
+  // respect is the worst case actually involved, not the smallest.
+  const positionUncertaintyKm = hasViirs ? undefined : Math.max(...meteosatDets.map(meteosatDetectionRadiusKm));
+
   return {
     ...event, maxFrp, maxConfidence, passCount, maxPixelsInSinglePass, score, evidence, evidenceShort, status,
     positionSource: hasViirs ? 'viirs' : 'meteosat',
-    positionUncertaintyKm: hasViirs ? undefined : METEOSAT_POSITION_UNCERTAINTY_KM,
+    positionUncertaintyKm,
     geoTracked: hasViirs && meteosatDets.length > 0,
   };
 }
@@ -683,7 +706,7 @@ export function telegramText(event: FireEvent, referenceTime = new Date(), proxi
   // ~10min revisit is a different, good-news claim (more frequent watch on
   // an already-confirmed fire), so it gets its own, separate line instead.
   const meteosatOnlyBit = event.positionSource === 'meteosat'
-    ? `🛰 Signal géostationnaire Meteosat — position approximative (±${event.positionUncertaintyKm ?? METEOSAT_POSITION_UNCERTAINTY_KM} km), non confirmé par satellite polaire\n\n`
+    ? `🛰 Signal géostationnaire Meteosat — position approximative (±${(event.positionUncertaintyKm ?? METEOSAT_POSITION_UNCERTAINTY_KM).toFixed(1)} km), non confirmé par satellite polaire\n\n`
     : '';
   const geoTrackedBit = event.geoTracked ? `🛰 Suivi Meteosat actif (toutes les ${METEOSAT_CADENCE_MIN} min)\n\n` : '';
 
