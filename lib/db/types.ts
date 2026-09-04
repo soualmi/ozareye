@@ -78,6 +78,19 @@ export interface Backend {
   recordDetectionDay(cell: string, day: string): Promise<void>;
   distinctDayCount(cell: string, sinceDay: string): Promise<number>;
   pruneHotspotHistory(beforeDay: string): Promise<void>;
+  // "Détection précoce" signal 2 (lib/fire-monitor.ts) — the local FRP
+  // history a real VIIRS detection is compared against. Sibling table to
+  // hotspot_days above (same cell key, same 30-day retention/cutoff), keyed
+  // additionally by hour-of-day since a cell's normal FRP genuinely varies
+  // by time of day (afternoon heat vs. night). One row per (cell, day,
+  // hour) holding that hour's max FRP — recordFrpObservation upserts the
+  // higher of the existing and new value.
+  recordFrpObservation(cell: string, day: string, hour: number, frp: number): Promise<void>;
+  // Average max-FRP for (cell, hour) over days >= sinceDay, plus how many
+  // distinct days contributed — null when there's no history at all yet
+  // (a brand-new cell), letting the caller apply EARLY_DETECTION_ANOMALY_MIN_SAMPLES.
+  frpBaseline(cell: string, hour: number, sinceDay: string): Promise<{ avgFrp: number; days: number } | null>;
+  pruneFrpHistory(beforeDay: string): Promise<void>;
   eventsSince(sinceIso: string, limit?: number): Promise<FireEvent[]>;
   eventsBetween(fromIso: string, toIso: string, limit?: number): Promise<FireEvent[]>;
   getConfig(): Promise<EngineConfig>;

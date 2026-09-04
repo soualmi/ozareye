@@ -35,6 +35,12 @@ export type Detection = {
   // METEOSAT_POSITION_UNCERTAINTY_KM below when absent (a malformed/legacy
   // CAP entry) — never fabricated as a real reading.
   radiusKm?: number;
+  // VIIRS only — set upstream (app/api/monitor/route.ts, before
+  // clusterDetections) when this detection's FRP is significantly above the
+  // stored 30-day local baseline for its grid cell/hour-of-day. Computed
+  // outside scoreEvent() specifically so scoreEvent() stays synchronous and
+  // DB-free — see EARLY_DETECTION_ANOMALY_BOOST below.
+  baselineFrpExceeded?: boolean;
 };
 
 export type VillageExposure = {
@@ -152,6 +158,52 @@ const METEOSAT_ALERT_MIN_DETECTIONS = 2;
 // permissive at 10-20min) so a Meteosat-only signal must persist across at
 // least 3 real revisits before it can ever alert, not just repeat once.
 const METEOSAT_ALERT_MIN_SPAN_MIN = 30;
+
+// "Détection précoce" (early detection) — three small, additive score
+// boosts, NOT a replacement for clustering or the ALERT_SCORE_THRESHOLD
+// gate itself (that stays 70 everywhere it's checked). Originally specified
+// as a temperature-slope-across-successive-Meteosat-images signal; adapted
+// because MTG's CAP product carries no per-pixel FRP/intensity time series
+// to compute a slope from (confirmed during this feature's own Step 1
+// product inspection) — these three signals are the closest honest
+// equivalent using data that actually exists.
+
+// Signal 1 — Zoning: a fire near people (a village) matters sooner than an
+// identical one in open, unpopulated terrain — boosts the INPUT score so it
+// crosses the existing threshold sooner; the threshold itself is untouched.
+// "forest" was in the original ask but there is no forest/vegetation-cover
+// dataset in this codebase to check against (lib/landuse.ts's 'natural'
+// context means only "not a known industrial site", not "is forest") — this
+// uses the one real proximity dataset that exists, villages.json.
+const EARLY_DETECTION_ZONE_RADIUS_KM = 3;
+const EARLY_DETECTION_ZONE_BOOST = 8;
+
+// Signal 2 — FRP anomaly vs local history: a detection well above what THIS
+// specific ~1km cell/hour normally produces is informative even at a low
+// absolute FRP (e.g. a genuine new ignition where nothing has burned
+// before) — reuses the same 30-day, per-cell learning the persistent-source
+// guard (hotspot_days) already does, just keyed on FRP instead of on
+// day-presence (see lib/database.ts recordFrpObservation/frpBaseline,
+// added alongside hotspot_days rather than duplicating its table).
+// Computed upstream (app/api/monitor/route.ts, the only place with DB
+// access) and passed in via Detection.baselineFrpExceeded — scoreEvent()
+// itself stays fully synchronous, so every existing test keeps working
+// unchanged and this signal is unit-testable without a DB.
+const EARLY_DETECTION_ANOMALY_BOOST = 10;
+// "Significantly above" = at least this many times the local historical
+// average FRP for that cell/hour.
+export const EARLY_DETECTION_ANOMALY_MULTIPLIER = 2;
+// A single prior reading isn't a "baseline" — require at least this many
+// distinct historical days at that cell/hour before comparing against it.
+export const EARLY_DETECTION_ANOMALY_MIN_SAMPLES = 3;
+
+// Signal 3 — Meteosat persistence: a VIIRS-confirmed fire ALSO picked up by
+// >=2 independent Meteosat passes (a wholly different sensor, ~10min
+// cadence) is stronger evidence than either alone. Distinct from the
+// existing `geoTracked` flag (>=1 Meteosat pass, a display/UX signal) —
+// this specifically requires >=2 and only affects `score`.
+const EARLY_DETECTION_METEOSAT_PERSISTENCE_MIN_PASSES = 2;
+const EARLY_DETECTION_METEOSAT_PERSISTENCE_BOOST = 8;
 
 // Rule (c), locked: "villages: proximity radius widened by 3km" for a
 // Meteosat-positioned event — the position itself carries that much
@@ -452,6 +504,29 @@ function scoreEvent(event: FireEvent, frpThresholdMw = DEFAULT_FRP_THRESHOLD_MW)
   if (maxPixelsInSinglePass >= 3) { score += 10; evidence.push(`Feu étendu · ${maxPixelsInSinglePass} pixels dans un même passage (taille, pas confirmation)`); evidenceShort.push(`taille×${maxPixelsInSinglePass}`); }
   if (passCount > 1) { score += 25; evidence.push(`Recoupé par un passage/capteur différent (${passCount} passages distincts)`); evidenceShort.push('recoupé'); }
   if (event.latitude >= 34 && event.latitude <= 37.5) { score += 5; evidence.push('Bande nord à végétation sensible'); }
+
+  // Détection précoce, signal 1 (zoning): boosts the input score, never the
+  // ALERT_SCORE_THRESHOLD gate itself.
+  if (hasNearbyVillage(event, EARLY_DETECTION_ZONE_RADIUS_KM)) {
+    score += EARLY_DETECTION_ZONE_BOOST;
+    evidence.push(`Zone habitée à proximité (<${EARLY_DETECTION_ZONE_RADIUS_KM}km)`); evidenceShort.push('zone+');
+  }
+  // Détection précoce, signal 2 (FRP anomaly vs local history): flagged
+  // upstream per-detection (route.ts), read here — any VIIRS detection in
+  // this event flagged is enough, same "any pixel proves it" shape as the
+  // confidence/FRP bands above.
+  if (event.detections.some(d => d.baselineFrpExceeded)) {
+    score += EARLY_DETECTION_ANOMALY_BOOST;
+    evidence.push(`FRP nettement au-dessus de l'historique local (≥${EARLY_DETECTION_ANOMALY_MULTIPLIER}× la moyenne 30j de cette cellule)`); evidenceShort.push('anomalie');
+  }
+  // Détection précoce, signal 3 (Meteosat persistence): a VIIRS-confirmed
+  // fire ALSO hit by >=2 independent Meteosat passes — distinct from (and
+  // additional to) geoTracked below, which only requires >=1.
+  const meteosatPassCount = new Set(meteosatDets.map(d => d.acquiredAt)).size;
+  if (hasViirs && meteosatPassCount >= EARLY_DETECTION_METEOSAT_PERSISTENCE_MIN_PASSES) {
+    score += EARLY_DETECTION_METEOSAT_PERSISTENCE_BOOST;
+    evidence.push(`Corroboré par Meteosat (${meteosatPassCount} passages)`); evidenceShort.push('meteosat+');
+  }
   score = Math.min(score, 100);
 
   let status: FireEvent['status'] = score >= 85 ? 'urgent' : score >= 65 ? 'corroborated' : 'observation';

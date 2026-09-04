@@ -15,12 +15,12 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import {
-  ALERT_SCORE_THRESHOLD, clusterDetections, effectiveProximityKm, enrichWeather, eventWilaya, fetchDetections, gridCell, hasNearbyVillage, lowerStatus, telegramText,
+  ALERT_SCORE_THRESHOLD, clusterDetections, EARLY_DETECTION_ANOMALY_MIN_SAMPLES, EARLY_DETECTION_ANOMALY_MULTIPLIER, effectiveProximityKm, enrichWeather, eventWilaya, fetchDetections, gridCell, hasNearbyVillage, isMeteosatDetection, lowerStatus, telegramText,
   DEFAULT_PERSISTENT_SOURCE_WINDOW_DAYS, FIRMS_SOURCES, MTG_SOURCE, type Detection, type FireEvent,
 } from '@/lib/fire-monitor';
 import { fetchMeteosatSlots } from '@/lib/meteosat';
 import { lookupLandUse } from '@/lib/landuse';
-import { activeEvents, distinctDayCount, getConfig, initDb, isFirstRun, pruneHotspotHistory, recordDetectionDay, saveSignal, type EngineConfig } from '@/lib/database';
+import { activeEvents, distinctDayCount, frpBaseline, getConfig, initDb, isFirstRun, pruneFrpHistory, pruneHotspotHistory, recordDetectionDay, recordFrpObservation, saveSignal, type EngineConfig } from '@/lib/database';
 import { bboxToString } from '@/scripts/build-villages';
 import { chatIdForWilaya } from '@/lib/wilaya-routing';
 import { appendRunLog } from '@/lib/run-log';
@@ -89,6 +89,48 @@ async function suppressPersistentSources(detections: Detection[], persistentSour
   return { kept, suppressed };
 }
 
+// Détection précoce, signal 2 (lib/fire-monitor.ts's EARLY_DETECTION_ANOMALY_*):
+// flags a VIIRS detection whose FRP is significantly above the stored
+// 30-day local (cell, hour-of-day) baseline — reuses hotspot_days'
+// window/cutoff shape (see suppressPersistentSources above), on the
+// sibling frp_history table (lib/database.ts). The baseline is read BEFORE
+// today's own value is recorded, so a detection is never compared against
+// itself. Meteosat detections are skipped entirely — they carry no FRP to
+// compare (always 0). Fail-soft per detection: any DB error just skips
+// that one detection's annotation, never blocks or throws.
+async function annotateFrpAnomaly(detections: Detection[]): Promise<Detection[]> {
+  const cutoff = new Date(Date.now() - DEFAULT_PERSISTENT_SOURCE_WINDOW_DAYS * 86_400_000).toISOString().slice(0, 10);
+  await pruneFrpHistory(cutoff);
+
+  const out: Detection[] = [];
+  for (const det of detections) {
+    if (isMeteosatDetection(det)) { out.push(det); continue; }
+    const cell = gridCell(det.latitude, det.longitude);
+    const day = det.acquiredAt.slice(0, 10);
+    const hour = new Date(det.acquiredAt).getUTCHours();
+
+    // Two independent fail-soft steps, each pushed/recorded exactly once —
+    // a failure in either must never duplicate or drop this detection.
+    let annotated = det;
+    try {
+      const baseline = await frpBaseline(cell, hour, cutoff);
+      if (baseline !== null && baseline.days >= EARLY_DETECTION_ANOMALY_MIN_SAMPLES && det.frp >= baseline.avgFrp * EARLY_DETECTION_ANOMALY_MULTIPLIER) {
+        annotated = { ...det, baselineFrpExceeded: true };
+      }
+    } catch (error) {
+      console.log(`FRP baseline lookup FAILED for cell ${cell}h${hour}, skipping anomaly annotation: ${error instanceof Error ? error.message : error}`);
+    }
+    out.push(annotated);
+
+    try {
+      await recordFrpObservation(cell, day, hour, det.frp);
+    } catch (error) {
+      console.log(`FRP observation record FAILED for cell ${cell}h${hour}: ${error instanceof Error ? error.message : error}`);
+    }
+  }
+  return out;
+}
+
 // Land-use context (lib/landuse.ts, an OSM/Overpass lookup): tags an event
 // when it sits on a known industrial/energy site and lowers its status one
 // rung so it never reads as a top "urgent" red alert for what is very likely
@@ -155,7 +197,8 @@ async function runMonitor(request: Request): Promise<Response> {
   const meteosatResult = await fetchMeteosatSlots(config.bbox);
   await recordSourceOutcome(MTG_SOURCE, meteosatResult.ok ? { success: true } : { success: false, error: meteosatResult.error ?? 'erreur inconnue' });
 
-  const { kept: detections, suppressed } = await suppressPersistentSources([...rawDetections, ...meteosatResult.detections], config.persistentSourceDays);
+  const { kept, suppressed } = await suppressPersistentSources([...rawDetections, ...meteosatResult.detections], config.persistentSourceDays);
+  const detections = await annotateFrpAnomaly(kept);
   const events = clusterDetections(detections, await activeEvents(), config.frpThresholdMw);
 
   const sourcesLog = [

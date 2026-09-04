@@ -51,6 +51,11 @@ const CREATE_INDEX = `CREATE INDEX IF NOT EXISTS idx_fire_events_last ON fire_ev
 // a real wildfire ever would. See PERSISTENT_SOURCE_DAY_THRESHOLD.
 const CREATE_HOTSPOT_TABLE = `CREATE TABLE IF NOT EXISTS hotspot_days (cell TEXT NOT NULL, day TEXT NOT NULL, PRIMARY KEY (cell, day))`;
 
+// "Détection précoce" signal 2 (lib/fire-monitor.ts) — sibling table to
+// hotspot_days above, same cell/30-day retention, additionally keyed by
+// hour-of-day. One row per (cell, day, hour) holding that hour's max FRP.
+const CREATE_FRP_HISTORY_TABLE = `CREATE TABLE IF NOT EXISTS frp_history (cell TEXT NOT NULL, day TEXT NOT NULL, hour INTEGER NOT NULL, max_frp REAL NOT NULL, PRIMARY KEY (cell, day, hour))`;
+
 // Per-source health for the watchdog (lib/source-health.ts) — one row per
 // source name, created on its first recorded outcome (no seed rows).
 const CREATE_SOURCE_HEALTH_TABLE = `CREATE TABLE IF NOT EXISTS source_health (
@@ -139,7 +144,7 @@ function dbRowToSourceHealth(row: SourceHealthDbRow): SourceHealthRow {
 export function createSqliteBackend(): Backend {
   return {
     async initDb() {
-      db().exec(CREATE_TABLE); db().exec(CREATE_INDEX); db().exec(CREATE_HOTSPOT_TABLE); db().exec(CREATE_CONFIG_TABLE); db().exec(CREATE_SOURCE_HEALTH_TABLE); db().exec(CREATE_INGEST_STATE_TABLE);
+      db().exec(CREATE_TABLE); db().exec(CREATE_INDEX); db().exec(CREATE_HOTSPOT_TABLE); db().exec(CREATE_CONFIG_TABLE); db().exec(CREATE_SOURCE_HEALTH_TABLE); db().exec(CREATE_INGEST_STATE_TABLE); db().exec(CREATE_FRP_HISTORY_TABLE);
     },
 
     // The upsert the whole de-dup fix depends on: SQLite's ON CONFLICT(id) DO
@@ -187,6 +192,7 @@ export function createSqliteBackend(): Backend {
     async clearFireHistory() {
       db().exec('DELETE FROM fire_events');
       db().exec('DELETE FROM hotspot_days');
+      db().exec('DELETE FROM frp_history');
     },
 
     async recordDetectionDay(cell: string, day: string) {
@@ -200,6 +206,21 @@ export function createSqliteBackend(): Backend {
 
     async pruneHotspotHistory(beforeDay: string) {
       db().prepare('DELETE FROM hotspot_days WHERE day < ?').run(beforeDay);
+    },
+
+    async recordFrpObservation(cell: string, day: string, hour: number, frp: number) {
+      db().prepare(`INSERT INTO frp_history (cell, day, hour, max_frp) VALUES (@cell, @day, @hour, @frp)
+        ON CONFLICT(cell, day, hour) DO UPDATE SET max_frp = MAX(max_frp, excluded.max_frp)`)
+        .run({ cell, day, hour, frp });
+    },
+
+    async frpBaseline(cell: string, hour: number, sinceDay: string) {
+      const row = db().prepare('SELECT AVG(max_frp) as avg_frp, COUNT(*) as days FROM frp_history WHERE cell = ? AND hour = ? AND day >= ?').get(cell, hour, sinceDay) as { avg_frp: number | null; days: number };
+      return row.days > 0 ? { avgFrp: row.avg_frp!, days: row.days } : null;
+    },
+
+    async pruneFrpHistory(beforeDay: string) {
+      db().prepare('DELETE FROM frp_history WHERE day < ?').run(beforeDay);
     },
 
     async eventsSince(sinceIso: string, limit = 200) {

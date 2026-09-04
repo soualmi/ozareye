@@ -118,6 +118,7 @@ export function createPostgresBackend(connectionString: string): Backend {
         last_notified_at TEXT
       )`;
       await sql`CREATE TABLE IF NOT EXISTS ingest_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`;
+      await sql`CREATE TABLE IF NOT EXISTS frp_history (cell TEXT NOT NULL, day TEXT NOT NULL, hour INTEGER NOT NULL, max_frp REAL NOT NULL, PRIMARY KEY (cell, day, hour))`;
     },
 
     // The upsert the whole de-dup fix depends on — Postgres's native
@@ -167,6 +168,7 @@ export function createPostgresBackend(connectionString: string): Backend {
     async clearFireHistory() {
       await sql`DELETE FROM fire_events`;
       await sql`DELETE FROM hotspot_days`;
+      await sql`DELETE FROM frp_history`;
     },
 
     // SQLite's `INSERT OR IGNORE` -> Postgres's `ON CONFLICT (...) DO NOTHING`,
@@ -182,6 +184,24 @@ export function createPostgresBackend(connectionString: string): Backend {
 
     async pruneHotspotHistory(beforeDay: string) {
       await sql`DELETE FROM hotspot_days WHERE day < ${beforeDay}`;
+    },
+
+    // "Détection précoce" signal 2 (lib/fire-monitor.ts) — sibling table to
+    // hotspot_days, same cell/30-day retention, additionally keyed by
+    // hour-of-day (see lib/db/sqlite.ts's CREATE_FRP_HISTORY_TABLE comment).
+    async recordFrpObservation(cell: string, day: string, hour: number, frp: number) {
+      await sql`INSERT INTO frp_history (cell, day, hour, max_frp) VALUES (${cell}, ${day}, ${hour}, ${frp})
+        ON CONFLICT (cell, day, hour) DO UPDATE SET max_frp = GREATEST(frp_history.max_frp, EXCLUDED.max_frp)`;
+    },
+
+    async frpBaseline(cell: string, hour: number, sinceDay: string) {
+      const rows = await sql`SELECT AVG(max_frp) as avg_frp, COUNT(*)::int as days FROM frp_history WHERE cell = ${cell} AND hour = ${hour} AND day >= ${sinceDay}` as { avg_frp: string | null; days: number }[];
+      const row = rows[0];
+      return row && row.days > 0 ? { avgFrp: Number(row.avg_frp), days: row.days } : null;
+    },
+
+    async pruneFrpHistory(beforeDay: string) {
+      await sql`DELETE FROM frp_history WHERE day < ${beforeDay}`;
     },
 
     async eventsSince(sinceIso: string, limit = 200) {

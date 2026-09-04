@@ -58,6 +58,9 @@ export async function clearFireHistory() { return (await backend()).clearFireHis
 export async function recordDetectionDay(cell: string, day: string) { return (await backend()).recordDetectionDay(cell, day); }
 export async function distinctDayCount(cell: string, sinceDay: string) { return (await backend()).distinctDayCount(cell, sinceDay); }
 export async function pruneHotspotHistory(beforeDay: string) { return (await backend()).pruneHotspotHistory(beforeDay); }
+export async function recordFrpObservation(cell: string, day: string, hour: number, frp: number) { return (await backend()).recordFrpObservation(cell, day, hour, frp); }
+export async function frpBaseline(cell: string, hour: number, sinceDay: string) { return (await backend()).frpBaseline(cell, hour, sinceDay); }
+export async function pruneFrpHistory(beforeDay: string) { return (await backend()).pruneFrpHistory(beforeDay); }
 export async function eventsSince(sinceIso: string, limit?: number) { return (await backend()).eventsSince(sinceIso, limit); }
 export async function eventsBetween(fromIso: string, toIso: string, limit?: number) { return (await backend()).eventsBetween(fromIso, toIso, limit); }
 export async function getConfig() { return (await backend()).getConfig(); }
