@@ -54,3 +54,6 @@ tsconfig.tsbuildinfo
 
 # industrial-site index build: resume checkpoint, not the shipped dataset
 /data/.industrial-index-progress.json
+
+# fire-station index build: resume checkpoint, not the shipped dataset
+/data/.firestation-index-progress.json

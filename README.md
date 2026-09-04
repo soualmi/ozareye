@@ -338,6 +338,25 @@ the effort before starting:
    Overpass was the only path) against the new local index — events already
    tagged `industrial`/`natural` are left untouched.
 
+5. **The fire-station index.** `data/fire-stations.json` is a flat array of
+   `{osm_id, name, lat, lon, phone}` — every OSM `amenity=fire_station`
+   inside the configured bbox, built **once, offline** by
+   `scripts/build-firestation-index.ts` exactly the way the industrial index
+   is (same tile walk, same full-planet mirrors, same resume checkpoint at
+   `data/.firestation-index-progress.json`, gitignored). `lib/firestation.ts`
+   answers "nearest caserne to this event" with a plain haversine scan over
+   it (a few hundred entries — no grid needed) and feeds the "Caserne la plus
+   proche : … — X km" line on the dashboard card/popup/detail and in the
+   Telegram message. `phone` is the station's own OSM `phone`/`contact:phone`
+   tag or `null` — never inferred; the dashboard's tel: link falls back to
+   the national Protection Civile number (`lib/emergency-numbers.ts`, which
+   also feeds the always-visible emergency-numbers panel — replace those
+   constants for a new country, they are Algeria's). A missing index fails
+   soft: no station line anywhere, nothing else affected.
+   ```bash
+   npm run build-firestation-index
+   ```
+
 ## 6. The dashboard
 
 A small password-gated web dashboard at `/dashboard` (login at `/login`)
