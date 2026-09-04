@@ -61,7 +61,11 @@ export async function fetchMeteosatSlots(bbox: { west: number; south: number; ea
     // Sequential, single subprocess, no retry loop here — eumdac already
     // retries 429/5xx internally (per its own docs), and this run's only job
     // is to not hang the whole monitor run if EUMETSAT is slow or down.
-    const result = spawnSync(pythonBin, [SCRIPT_PATH, '--since', since, '--bbox', bboxStr], { encoding: 'utf8', timeout: 60_000 });
+    // --since/--bbox use the `--flag=value` form, not two separate argv
+    // entries: a bbox's west value is routinely negative ("-2.5,..."), and
+    // argparse treats a bare token starting with "-" as another option
+    // rather than this one's value unless it's joined with "=".
+    const result = spawnSync(pythonBin, [SCRIPT_PATH, `--since=${since}`, `--bbox=${bboxStr}`], { encoding: 'utf8', timeout: 60_000 });
 
     if (result.error) throw result.error;
     if (result.status !== 0) {
