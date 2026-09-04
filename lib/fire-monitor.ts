@@ -61,6 +61,23 @@ export type FireEvent = {
   villages?: VillageExposure[];
   landUse?: LandUseInfo;
   notifiedAt?: string; notifiedScore?: number; notifiedStatus?: FireEvent['status'];
+  // Meteosat fusion (see clusterDetections/scoreEvent below) — recomputed
+  // from event.detections every poll, exactly like maxFrp/passCount above,
+  // never trusted as separately-mutated state. 'viirs' (or absent, for
+  // events saved before this feature existed) whenever the event has at
+  // least one polar (VIIRS) pass, regardless of how many Meteosat passes
+  // also hit it — a Meteosat pixel NEVER moves a VIIRS-anchored position.
+  positionSource?: 'viirs' | 'meteosat';
+  // ~3km, only set when positionSource is 'meteosat' — the FCI pixel size,
+  // not a made-up figure. Undefined (not 0) once VIIRS re-anchors the event,
+  // so the dashboard/Telegram "±3km" caveat disappears along with the cap.
+  positionUncertaintyKm?: number;
+  // True once a VIIRS-anchored event has also been hit by >=1 Meteosat pass —
+  // "confirmed fire, now also getting the ~10min geostationary revisit" is a
+  // materially different claim from "unconfirmed geostationary-only signal"
+  // (positionSource === 'meteosat'), hence the separate flag rather than
+  // overloading positionSource for it.
+  geoTracked?: boolean;
 };
 
 const villages = villagesData as { osm_id: string; name: string; name_ar: string | null; 'name:fr'?: string | null; lat: number; lon: number; place: string; wilaya: string }[];
@@ -94,6 +111,43 @@ export function gridCell(lat: number, lon: number): string {
 const CLUSTER_RADIUS_KM = 2;
 const CLUSTER_TIME_HOURS = 12;
 const EXPOSURE_RADIUS_KM = 20;
+
+// Meteosat fusion (lib/meteosat.ts feeds MTG_FIR detections into the same
+// clusterDetections() VIIRS already uses — see that function and scoreEvent()
+// below for the actual rules). `instrument` is already how every Detection
+// distinguishes its sensor (VIIRS's FIRMS rows always carry 'VIIRS'); MTG's
+// FCI instrument is the natural, already-present field to key fusion on
+// rather than adding a redundant boolean to Detection.
+export const MTG_SOURCE = 'MTG_FIR';
+const METEOSAT_SATELLITE = 'MTI1';
+const METEOSAT_INSTRUMENT = 'FCI';
+export function isMeteosatDetection(d: Detection): boolean {
+  return d.instrument === METEOSAT_INSTRUMENT;
+}
+// FCI's Active Fire Monitoring pixel is ~2km at nadir; 3km is the round,
+// slightly conservative figure this project quotes for the position
+// uncertainty and the widened proximity/join radius (rules a-e) alike.
+export const METEOSAT_POSITION_UNCERTAINTY_KM = 3;
+const METEOSAT_JOIN_RADIUS_KM = METEOSAT_POSITION_UNCERTAINTY_KM;
+// Real measured cadence (see the product inspection this feature shipped
+// with): every 10 minutes, not the 15 originally assumed. Shown verbatim in
+// the "suivi Meteosat" copy below.
+export const METEOSAT_CADENCE_MIN = 10;
+const METEOSAT_ALERT_MIN_DETECTIONS = 2;
+// "~2 consecutive passes, ~30 min apart" — kept as an absolute 30-minute
+// span (not "2 cadence cycles", which the real 10min cadence would make too
+// permissive at 10-20min) so a Meteosat-only signal must persist across at
+// least 3 real revisits before it can ever alert, not just repeat once.
+const METEOSAT_ALERT_MIN_SPAN_MIN = 30;
+
+// Rule (c), locked: "villages: proximity radius widened by 3km" for a
+// Meteosat-positioned event — the position itself carries that much
+// uncertainty, so a village just outside the normal proximityKm can still be
+// the one actually at risk. Used both for the Meteosat-only alert gate
+// (route.ts) and for which villages the message names (telegramText below).
+export function effectiveProximityKm(event: Pick<FireEvent, 'positionSource' | 'positionUncertaintyKm'>, proximityKm: number): number {
+  return event.positionSource === 'meteosat' ? proximityKm + (event.positionUncertaintyKm ?? METEOSAT_POSITION_UNCERTAINTY_KM) : proximityKm;
+}
 // A village this close to the fire is always named, regardless of wind
 // classification — at this range wind direction can shift, terrain deflects it,
 // and embers travel independently of the prevailing flow.
@@ -211,26 +265,75 @@ function withinClusterWindow(ev: FireEvent, det: Detection): boolean {
   return ev.detections.some(d => hoursBetween(d.acquiredAt, det.acquiredAt) <= CLUSTER_TIME_HOURS);
 }
 
+// True once `ev` has at least one non-Meteosat (polar/VIIRS) detection —
+// the single fact the fusion rules below key everything on. Recomputed from
+// detections rather than trusted from a stored flag, same philosophy as
+// maxFrp/passCount in scoreEvent().
+function eventHasViirs(ev: FireEvent): boolean {
+  return ev.detections.some(d => !isMeteosatDetection(d));
+}
+
+// Rule (a)/(b)/(d), locked: once an event has any VIIRS pass, its position is
+// the average of ONLY its VIIRS detections forever after — a Meteosat pixel
+// joining later (rule a) or a Meteosat-only event being re-anchored by a
+// first VIIRS pass (rule d) must never move it. An event with no VIIRS pass
+// yet keeps averaging all its Meteosat detections (rule b) — the same
+// "average everything" behaviour this function replaces, just scoped to
+// whichever detections are allowed to count.
+function recomputeCentroid(ev: FireEvent): void {
+  const anchor = ev.detections.filter(d => !isMeteosatDetection(d));
+  const pool = anchor.length > 0 ? anchor : ev.detections;
+  ev.latitude = average(pool.map(d => d.latitude));
+  ev.longitude = average(pool.map(d => d.longitude));
+}
+
+function joinDetection(det: Detection, events: FireEvent[], joinRadiusForEvent: (ev: FireEvent) => number): void {
+  let best: FireEvent | null = null, bestDist = Infinity;
+  for (const ev of events) {
+    const dist = distanceKm(ev.latitude, ev.longitude, det.latitude, det.longitude);
+    if (dist <= joinRadiusForEvent(ev) && withinClusterWindow(ev, det) && dist < bestDist) {
+      best = ev; bestDist = dist;
+    }
+  }
+  if (best) {
+    const isDuplicate = best.detections.some(d => isSameDetection(d, det));
+    if (!isDuplicate) {
+      const wasMeteosatOnly = !eventHasViirs(best);
+      best.detections.push(det);
+      recomputeCentroid(best);
+      if (wasMeteosatOnly && !isMeteosatDetection(det)) {
+        console.log(`event ${best.id}: re-anchored from Meteosat-only to VIIRS position (rule d)`);
+      }
+      best.firstAcquiredAt = best.detections.reduce((min, d) => d.acquiredAt < min ? d.acquiredAt : min, best.firstAcquiredAt);
+      best.lastAcquiredAt = best.detections.reduce((max, d) => d.acquiredAt > max ? d.acquiredAt : max, best.lastAcquiredAt);
+    }
+  } else {
+    events.push(newEventFrom(det));
+  }
+}
+
+/**
+ * Groups raw pixel detections into fire events (~2km / 12h), merging into
+ * existing events (e.g. from a prior poll) rather than creating duplicates.
+ * `events` is mutated in place and returned. One event = one fire, so
+ * downstream alerting fires once per event, not once per pixel.
+ *
+ * Meteosat fusion (locked rules a-e, see the feature's commit/PR notes):
+ * VIIRS detections join at the normal 2km radius against a VIIRS-anchored
+ * event, but widen to 3km specifically to catch (and re-anchor, rule d) a
+ * Meteosat-only event. Meteosat detections always join at the 3km pixel-
+ * uncertainty radius, whether the match is VIIRS-anchored (rule a: attaches
+ * as a pass, never moves the position) or Meteosat-only (rule b: position is
+ * the mean of Meteosat detections). Status capping and the 2-pass/~30min
+ * alert gate for Meteosat-only events happen in scoreEvent() below, since
+ * that's the pass every event already flows through here.
+ */
 export function clusterDetections(detections: Detection[], events: FireEvent[], frpThresholdMw = DEFAULT_FRP_THRESHOLD_MW): FireEvent[] {
   for (const det of detections) {
-    let best: FireEvent | null = null, bestDist = Infinity;
-    for (const ev of events) {
-      const dist = distanceKm(ev.latitude, ev.longitude, det.latitude, det.longitude);
-      if (dist <= CLUSTER_RADIUS_KM && withinClusterWindow(ev, det) && dist < bestDist) {
-        best = ev; bestDist = dist;
-      }
-    }
-    if (best) {
-      const isDuplicate = best.detections.some(d => isSameDetection(d, det));
-      if (!isDuplicate) {
-        best.detections.push(det);
-        best.latitude = average(best.detections.map(d => d.latitude));
-        best.longitude = average(best.detections.map(d => d.longitude));
-        best.firstAcquiredAt = best.detections.reduce((min, d) => d.acquiredAt < min ? d.acquiredAt : min, best.firstAcquiredAt);
-        best.lastAcquiredAt = best.detections.reduce((max, d) => d.acquiredAt > max ? d.acquiredAt : max, best.lastAcquiredAt);
-      }
+    if (isMeteosatDetection(det)) {
+      joinDetection(det, events, () => METEOSAT_JOIN_RADIUS_KM);
     } else {
-      events.push(newEventFrom(det));
+      joinDetection(det, events, ev => eventHasViirs(ev) ? CLUSTER_RADIUS_KM : METEOSAT_JOIN_RADIUS_KM);
     }
   }
   return mergeById(events).map(ev => scoreEvent(ev, frpThresholdMw));
@@ -262,11 +365,9 @@ function mergeEvents(a: FireEvent, b: FireEvent): FireEvent {
     notifiedAt = b.notifiedAt; notifiedScore = b.notifiedScore; notifiedStatus = b.notifiedStatus;
   }
 
-  return {
-    ...a, detections, firstAcquiredAt, lastAcquiredAt,
-    latitude: average(detections.map(d => d.latitude)), longitude: average(detections.map(d => d.longitude)),
-    notifiedAt, notifiedScore, notifiedStatus,
-  };
+  const merged: FireEvent = { ...a, detections, firstAcquiredAt, lastAcquiredAt, notifiedAt, notifiedScore, notifiedStatus };
+  recomputeCentroid(merged); // same VIIRS-anchored-if-present rule as the live join path above
+  return merged;
 }
 
 /**
@@ -275,6 +376,31 @@ function mergeEvents(a: FireEvent, b: FireEvent): FireEvent {
  * adjacent pixels from the SAME single pass mean the fire is big, not that
  * it's confirmed — that's scored separately, honestly labelled as size.
  */
+function meteosatDetectionSpanMinutes(dets: Detection[]): number {
+  const times = [...new Set(dets.map(d => d.acquiredAt))].map(t => new Date(t).getTime());
+  if (times.length < 2) return 0;
+  return (Math.max(...times) - Math.min(...times)) / 60_000;
+}
+
+// Rule (e), locked: a Meteosat-only event can only ever reach 'corroborated'
+// (never 'urgent') once at least METEOSAT_ALERT_MIN_DETECTIONS distinct
+// passes have hit the same spot at least METEOSAT_ALERT_MIN_SPAN_MIN apart —
+// several circles from the very same 10-minute frame don't count, since
+// that's the same single overpass, not a recurring signal.
+function meetsMeteosatAlertGate(meteosatDets: Detection[]): boolean {
+  const distinctPassTimes = new Set(meteosatDets.map(d => d.acquiredAt)).size;
+  return distinctPassTimes >= METEOSAT_ALERT_MIN_DETECTIONS && meteosatDetectionSpanMinutes(meteosatDets) >= METEOSAT_ALERT_MIN_SPAN_MIN;
+}
+
+// Villages within `radiusKm` of a point, ignoring wind — used only for the
+// Meteosat-only alert gate (rule e), which has no wind/weather enrichment to
+// work with (that only runs for score>=55, and a Meteosat-only event's score
+// never carries real FRP/confidence). A plain distance check is the correct,
+// honest substitute: "is there anyone to warn nearby", not "who's downwind".
+export function hasNearbyVillage(point: { latitude: number; longitude: number }, radiusKm: number): boolean {
+  return villages.some(v => distanceKm(point.latitude, point.longitude, v.lat, v.lon) <= radiusKm);
+}
+
 function scoreEvent(event: FireEvent, frpThresholdMw = DEFAULT_FRP_THRESHOLD_MW): FireEvent {
   const passKeys = new Map<string, number>();
   for (const d of event.detections) {
@@ -286,7 +412,15 @@ function scoreEvent(event: FireEvent, frpThresholdMw = DEFAULT_FRP_THRESHOLD_MW)
   const maxFrp = Math.max(...event.detections.map(d => d.frp));
   const maxConfidence = event.detections.reduce((best, d) => confidenceRank(d.confidence) > confidenceRank(best) ? d.confidence : best, event.detections[0].confidence);
 
-  const evidence: string[] = [`NASA FIRMS · ${event.detections.length} pixel(s) sur ${passCount} passage(s)`];
+  const meteosatDets = event.detections.filter(isMeteosatDetection);
+  const hasViirs = meteosatDets.length < event.detections.length;
+  // MTG's CAP product carries no per-detection FRP or confidence (unlike
+  // VIIRS) — maxFrp/maxConfidence above naturally stay whatever the VIIRS
+  // detections already established (Meteosat rows are frp:0, confidence:''),
+  // so nothing here needs to special-case them away.
+  const sourceLabel = !hasViirs ? 'EUMETSAT MTG' : meteosatDets.length > 0 ? 'NASA FIRMS + EUMETSAT MTG' : 'NASA FIRMS';
+
+  const evidence: string[] = [`${sourceLabel} · ${event.detections.length} pixel(s) sur ${passCount} passage(s)`];
   const evidenceShort: string[] = [`${passCount}pass`];
   let score = 25;
   if (confidenceRank(maxConfidence) === 2) { score += 25; evidence.push('Confiance satellite élevée'); evidenceShort.push('conf+'); }
@@ -297,15 +431,20 @@ function scoreEvent(event: FireEvent, frpThresholdMw = DEFAULT_FRP_THRESHOLD_MW)
   // self-hoster who lowers the threshold for a region with smaller/faster
   // fires gets a correspondingly lower whole ladder, not just the top rung.
   if (maxFrp >= frpThresholdMw) score += 20; else if (maxFrp >= frpThresholdMw * 0.4) score += 12; else if (maxFrp >= frpThresholdMw * 0.15) score += 5;
-  evidence.push(`Puissance radiative max ${maxFrp.toFixed(1)} MW`);
+  if (hasViirs) evidence.push(`Puissance radiative max ${maxFrp.toFixed(1)} MW`);
   if (maxPixelsInSinglePass >= 3) { score += 10; evidence.push(`Feu étendu · ${maxPixelsInSinglePass} pixels dans un même passage (taille, pas confirmation)`); evidenceShort.push(`taille×${maxPixelsInSinglePass}`); }
   if (passCount > 1) { score += 25; evidence.push(`Recoupé par un passage/capteur différent (${passCount} passages distincts)`); evidenceShort.push('recoupé'); }
   if (event.latitude >= 34 && event.latitude <= 37.5) { score += 5; evidence.push('Bande nord à végétation sensible'); }
   score = Math.min(score, 100);
 
+  let status: FireEvent['status'] = score >= 85 ? 'urgent' : score >= 65 ? 'corroborated' : 'observation';
+  if (!hasViirs) status = meetsMeteosatAlertGate(meteosatDets) ? 'corroborated' : 'observation';
+
   return {
-    ...event, maxFrp, maxConfidence, passCount, maxPixelsInSinglePass, score, evidence, evidenceShort,
-    status: score >= 85 ? 'urgent' : score >= 65 ? 'corroborated' : 'observation',
+    ...event, maxFrp, maxConfidence, passCount, maxPixelsInSinglePass, score, evidence, evidenceShort, status,
+    positionSource: hasViirs ? 'viirs' : 'meteosat',
+    positionUncertaintyKm: hasViirs ? undefined : METEOSAT_POSITION_UNCERTAINTY_KM,
+    geoTracked: hasViirs && meteosatDets.length > 0,
   };
 }
 
@@ -537,5 +676,21 @@ export function telegramText(event: FireEvent, referenceTime = new Date(), proxi
   // else (villages, FRP, evidence), not a note trailing behind them.
   const industrialBit = event.landUse?.context === 'industrial' ? `🏭 ${industrialContextLine(event.landUse.siteName)}\n\n` : '';
 
-  return `${icon} ${LABELS.headline} — À VÉRIFIER\n\n${industrialBit}${villageLines}\n\n📍${event.latitude.toFixed(4)},${event.longitude.toFixed(4)}${locationBit} ${algiersTime(event.lastAcquiredAt)}Alger(${ageMin}min) ${event.detections[event.detections.length - 1].instrument} FRP${event.maxFrp.toFixed(1)}MW\nPreuves: ${event.evidenceShort.join('·')}${windBit}\n\n⚠️${LABELS.disclaimer}\nNASA FIRMS·Open-Meteo`;
+  // Meteosat fusion (rules a/e, locked wording): a Meteosat-ONLY event has
+  // never been corroborated by a polar overpass and its position carries a
+  // real ±3km pixel uncertainty — the very first line must say so, before
+  // anything else. A VIIRS-anchored event additionally getting Meteosat's
+  // ~10min revisit is a different, good-news claim (more frequent watch on
+  // an already-confirmed fire), so it gets its own, separate line instead.
+  const meteosatOnlyBit = event.positionSource === 'meteosat'
+    ? `🛰 Signal géostationnaire Meteosat — position approximative (±${event.positionUncertaintyKm ?? METEOSAT_POSITION_UNCERTAINTY_KM} km), non confirmé par satellite polaire\n\n`
+    : '';
+  const geoTrackedBit = event.geoTracked ? `🛰 Suivi Meteosat actif (toutes les ${METEOSAT_CADENCE_MIN} min)\n\n` : '';
+
+  const lastIsMeteosat = isMeteosatDetection(event.detections[event.detections.length - 1]);
+  const frpBit = lastIsMeteosat ? '' : ` FRP${event.maxFrp.toFixed(1)}MW`;
+  const hasMeteosatPass = event.detections.some(isMeteosatDetection);
+  const attribution = hasMeteosatPass ? 'NASA FIRMS·Open-Meteo·MTG Active Fire Monitoring — EUMETSAT' : 'NASA FIRMS·Open-Meteo';
+
+  return `${icon} ${LABELS.headline} — À VÉRIFIER\n\n${meteosatOnlyBit}${geoTrackedBit}${industrialBit}${villageLines}\n\n📍${event.latitude.toFixed(4)},${event.longitude.toFixed(4)}${locationBit} ${algiersTime(event.lastAcquiredAt)}Alger(${ageMin}min) ${event.detections[event.detections.length - 1].instrument}${frpBit}\nPreuves: ${event.evidenceShort.join('·')}${windBit}\n\n⚠️${LABELS.disclaimer}\n${attribution}`;
 }

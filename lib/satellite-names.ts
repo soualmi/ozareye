@@ -24,6 +24,7 @@ const SATELLITE_NAMES: Record<string, string> = {
   VIIRS_NOAA20_NRT: 'NOAA-20', N20: 'NOAA-20',
   VIIRS_NOAA21_NRT: 'NOAA-21', N21: 'NOAA-21',
   VIIRS_SNPP_NRT: 'Suomi-NPP', N: 'Suomi-NPP',
+  MTG_FIR: 'Meteosat', MTI1: 'Meteosat',
 };
 
 export function satelliteName(raw: string): string {
