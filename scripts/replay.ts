@@ -58,6 +58,9 @@ const dbPath = arg('db', `data/replay-${from.replace(/-/g, '')}.db`)!;
 const outDir = arg('out', `replay-out/${from.replace(/-/g, '')}`)!;
 const box = arg('box');
 const delayMs = Number(arg('delay', '1200'));
+// Off by default so the original VIIRS-only command still reproduces the
+// original run unchanged (see lib/replay.ts's ReplayOptions.withMeteosat).
+const withMeteosat = process.argv.includes('--with-meteosat');
 // Rebuilds report.md from an existing events.json without re-fetching anything
 // — the report layout is the part most likely to need another pass.
 const renderOnly = process.argv.includes('--render-only');
@@ -85,7 +88,7 @@ fs.mkdirSync(path.dirname(path.resolve(dbPath)), { recursive: true });
 fs.mkdirSync(path.join(outDir, 'messages'), { recursive: true });
 
 const { runReplay, CRON_INTERVAL_MIN } = await import('../lib/replay');
-const { algiersTime, confidenceLabel, distinctPasses, eventWilaya, lowerStatus, DEFAULT_PROXIMITY_KM } = await import('../lib/fire-monitor');
+const { algiersTime, confidenceLabel, distinctPasses, eventWilaya, lowerStatus, DEFAULT_PROXIMITY_KM, EARLY_DETECTION_ANOMALY_MIN_SAMPLES } = await import('../lib/fire-monitor');
 const { satelliteName } = await import('../lib/satellite-names');
 const { getConfig, eventsBetween, saveSignal } = await import('../lib/database');
 
@@ -251,10 +254,10 @@ if (reevaluateLandUse) {
   process.exit(0);
 }
 
-console.log(`Replay ${from} → ${to} · db ${dbPath} · out ${outDir}`);
+console.log(`Replay ${from} → ${to} · db ${dbPath} · out ${outDir}${withMeteosat ? ' · +Meteosat (MTG_FIR)' : ''}`);
 const started = new Date();
 const result = await runReplay({
-  from, to, mapKey, box, landUseDelayMs: delayMs,
+  from, to, mapKey, box, landUseDelayMs: delayMs, withMeteosat,
   log: msg => console.log(msg),
 });
 const finished = new Date();
@@ -451,8 +454,27 @@ notes.push('');
 notes.push('## Sources FIRMS', '');
 notes.push('| Jour | Source | Lignes |');
 notes.push('|---|---|---:|');
-for (const s of result.sources) notes.push(`| ${s.day} | ${s.source} | ${s.rows}${s.error ? ` (${s.error.slice(0, 80)})` : ''} |`);
+for (const s of result.sources.filter(s => s.source !== 'MTG_FIR')) notes.push(`| ${s.day} | ${s.source} | ${s.rows}${s.error ? ` (${s.error.slice(0, 80)})` : ''} |`);
 notes.push('');
+
+if (withMeteosat) {
+  const mtgSources = result.sources.filter(s => s.source === 'MTG_FIR');
+  const totalMeteosat = Object.values(result.meteosatDetectionsPerDay ?? {}).reduce((a, b) => a + b, 0);
+  const meteosatEvents = result.events.filter(e => e.positionSource === 'meteosat');
+  const alertedEvents = result.events.filter(e => result.alerts.some(a => a.eventId === e.id));
+  const withZoneTag = alertedEvents.filter(e => e.evidenceShort.includes('zone+')).length;
+  const withAnomalyTag = alertedEvents.filter(e => e.evidenceShort.includes('anomalie')).length;
+  const withMeteosatPersistTag = alertedEvents.filter(e => e.evidenceShort.includes('meteosat+')).length;
+  const meteosatOnlyAlerted = alertedEvents.filter(e => e.positionSource === 'meteosat');
+  notes.push('## Sources MTG_FIR (Meteosat, EUMDAC)', '');
+  notes.push('| Jour | Produits/détections en emprise | Erreur |', '|---|---:|---|');
+  for (const s of mtgSources) notes.push(`| ${s.day} | ${s.rows} | ${s.error ? s.error.slice(0, 80) : '—'} |`);
+  notes.push('', `- Détections Meteosat totales sur la fenêtre : **${totalMeteosat}**.`);
+  notes.push(`- Événements dont la position est ancrée par Meteosat seul (aucun passage VIIRS) : **${meteosatEvents.length}** sur ${result.events.length}.`);
+  notes.push(`- Parmi les **${alertedEvents.length}** événements alertés par ce rejeu : ${meteosatOnlyAlerted.length} alertés par Meteosat seul (règle e), ${withZoneTag} avec le bonus signal 1 (zone habitée), ${withAnomalyTag} avec le bonus signal 2 (anomalie FRP vs historique local), ${withMeteosatPersistTag} avec le bonus signal 3 (persistance Meteosat sur un événement déjà confirmé VIIRS).`);
+  notes.push(`  - **Signal 2 (anomalie FRP) : historique quasi vide, comme attendu.** La table \`frp_history\` part vide au début de ce rejeu — un événement ne peut être flagué qu'après au moins ${EARLY_DETECTION_ANOMALY_MIN_SAMPLES} jours distincts d'historique sur la même cellule/heure, ce qu'une fenêtre de quelques jours ne peut produire qu'exceptionnellement (une cellule touchée ${EARLY_DETECTION_ANOMALY_MIN_SAMPLES} jours de suite à la même heure, y compris pendant ce rejeu même). Ce n'est pas un bug : c'est la limite de données déjà documentée pour ce signal (voir lib/early-detection.test.ts) — ${withAnomalyTag === 0 ? 'et effectivement, aucun événement alerté ici n\'a atteint ce seuil.' : `et ${withAnomalyTag} événement(s) l'ont malgré tout atteint.`}`);
+  notes.push('');
+}
 notes.push('## Différences avec le fonctionnement en direct', '');
 notes.push('1. **Vent : API archive, pas prévision.** Le live appelle `api.open-meteo.com/v1/forecast` (conditions courantes) ; le replay appelle `archive-api.open-meteo.com/v1/archive` et prend l\'heure archivée du passage satellite. Les villages sous le vent sont donc calculés avec le vent de l\'heure du passage.');
 notes.push(`2. **Cadence simulée.** Chaque journée est rejouée en tranches de ${CRON_INTERVAL_MIN} minutes — la cadence du cron en production — et non en un seul lot : un événement n'est scoré, alerté et rendu qu'avec les passages disponibles à cet instant. L'heure en tête de chaque message est donc l'heure à laquelle il serait réellement parti.`);

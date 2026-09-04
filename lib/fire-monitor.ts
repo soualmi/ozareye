@@ -585,7 +585,17 @@ function applyWeather(event: FireEvent, humidity?: number, windKph?: number, win
   if (humidity !== undefined && humidity < 30) { score += 5; evidence.push(`Air sec · ${humidity}% HR`); }
   if (windKph !== undefined && windKph >= 25) { score += 5; evidence.push(`Vent soutenu · ${windKph} km/h`); }
   score = Math.min(score, 100);
-  const enriched: FireEvent = { ...event, humidity, windKph, windDirectionFromDeg, score, evidence, status: score >= 85 ? 'urgent' : score >= 65 ? 'corroborated' : 'observation' };
+  // Rule (e), locked: a Meteosat-only event's status is the 2-pass/~30min
+  // gate (meetsMeteosatAlertGate in scoreEvent()), never the score ladder —
+  // its score can't carry real FRP/confidence, so the plain
+  // score>=65/85 bands below would near-permanently read it back down to
+  // 'observation' the instant weather enrichment recomputes status here,
+  // silently defeating shouldAlert's meteosat branch right after
+  // clusterDetections() had correctly set 'corroborated'.
+  const status: FireEvent['status'] = eventHasViirs(event)
+    ? (score >= 85 ? 'urgent' : score >= 65 ? 'corroborated' : 'observation')
+    : event.status;
+  const enriched: FireEvent = { ...event, humidity, windKph, windDirectionFromDeg, score, evidence, status };
   if (windDirectionFromDeg !== undefined) enriched.villages = computeExposedVillages(enriched);
   return enriched;
 }

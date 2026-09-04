@@ -57,6 +57,45 @@ function rowToDetection(row: RawRow): Detection {
   };
 }
 
+// Replay-only counterpart to fetchMeteosatSlots: a bounded [since, until)
+// archive window instead of an ingest_state cursor advancing toward "now".
+// No cursor is read or written — a replay's ALGERIE_FEUX_DB_PATH already
+// points at its own throwaway database, so there's nothing to protect here,
+// but a bounded range has no "watermark" concept to begin with. A single
+// day's worth of full-Algeria detections can run past Node's 1MB default
+// spawnSync buffer (see scripts/meteosat-fetch.py's module docstring on
+// real detection volume on a heavy wildfire day) — sized generously.
+export async function fetchMeteosatRange(bbox: { west: number; south: number; east: number; north: number }, sinceIso: string, untilIso: string): Promise<MeteosatResult> {
+  try {
+    const bboxStr = `${bbox.west},${bbox.south},${bbox.east},${bbox.north}`;
+    const pythonBin = process.env.METEOSAT_PYTHON_BIN || 'python3';
+    const result = spawnSync(pythonBin, [SCRIPT_PATH, `--since=${sinceIso}`, `--until=${untilIso}`, `--bbox=${bboxStr}`], { encoding: 'utf8', timeout: 300_000, maxBuffer: 256 * 1024 * 1024 });
+
+    if (result.error) throw result.error;
+    if (result.status !== 0) {
+      const message = (result.stderr || `python exited with status ${result.status}`).trim().slice(0, 300);
+      console.log(`source ${MTG_SOURCE} (replay ${sinceIso}..${untilIso}): FAILED (${message})`);
+      return { source: MTG_SOURCE, detections: [], ok: false, error: message };
+    }
+
+    const detections: Detection[] = [];
+    for (const line of result.stdout.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const row = JSON.parse(trimmed) as RawRow & { _cursor?: string };
+      if (row._cursor) continue; // no watermark to advance in a bounded replay window
+      detections.push(rowToDetection(row));
+    }
+
+    console.log(`source ${MTG_SOURCE} (replay ${sinceIso}..${untilIso}): ${detections.length} detection(s)`);
+    return { source: MTG_SOURCE, detections, ok: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.log(`source ${MTG_SOURCE} (replay ${sinceIso}..${untilIso}): FAILED (${message})`);
+    return { source: MTG_SOURCE, detections: [], ok: false, error: message };
+  }
+}
+
 export async function fetchMeteosatSlots(bbox: { west: number; south: number; east: number; north: number }): Promise<MeteosatResult> {
   try {
     const since = (await getIngestState(INGEST_STATE_KEY)) ?? new Date(Date.now() - DEFAULT_LOOKBACK_MIN * 60_000).toISOString();

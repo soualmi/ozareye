@@ -32,21 +32,30 @@
 // the replay wrote are used as ground truth to report how far off it is.
 import fs from 'node:fs';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 // Type-only: erased, so it doesn't load lib/database before the replay DB path
 // is set below.
 import type { FireEvent } from '../lib/fire-monitor';
 
-function arg(name: string, fallback: string): string {
+function arg(name: string, fallback?: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
   return i !== -1 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
 }
-const outDir = arg('out', 'replay-out/20260826');
-const dbPath = arg('db', 'data/replay-20260826.db');
+const outDir = arg('out', 'replay-out/20260826')!;
+const dbPath = arg('db', 'data/replay-20260826.db')!;
 process.env.ALGERIE_FEUX_DB_PATH = path.resolve(dbPath);
+// Optional: the ORIGINAL VIIRS-only replay to compare this run against (§7).
+// Reads its database directly (node:sqlite, read-only) rather than through
+// lib/database — that module's DB_PATH is a singleton captured once from
+// ALGERIE_FEUX_DB_PATH, already pointed at --db above.
+const baselineDb = arg('baseline-db');
+const baselineOut = arg('baseline-out');
 
 const { clusterDetections, ALERT_SCORE_THRESHOLD, algiersTime } = await import('../lib/fire-monitor');
+const { shouldAlert } = await import('../lib/replay');
 const { displayName } = await import('../lib/place-name');
 const { eventsBetween, getConfig } = await import('../lib/database');
+const { distanceKm } = await import('../lib/geo');
 
 const BUCKET_MS = 20 * 60_000;
 const FOCUS = ['Jijel', 'Béjaïa', 'Tizi Ouzou'];
@@ -71,6 +80,13 @@ const stored = await eventsBetween('2026-01-01T00:00:00Z', '2027-01-01T00:00:00Z
 const storedById = new Map(stored.map(e => [e.id, e] as const));
 
 // --- first alerting poll, recomputed from the stored detections -------------
+// Unchanged from before this file learned about Meteosat — kept exactly as
+// is (score >= ALERT_SCORE_THRESHOLD against the highest-scoring carried
+// candidate) so every VIIRS-only figure in §1-6 keeps matching previously
+// published reports byte for byte. It under-reconstructs Meteosat-only
+// alerts (their score never carries real FRP/confidence, so it rarely
+// crosses 70) — §7 below uses a separate, shouldAlert()-based reconstruction
+// for those instead of changing this one's long-standing behaviour.
 type FirstAlert = { atIso: string; frpAtAlert: number; passesAtAlert: number };
 
 function firstAlert(event: FireEvent): FirstAlert | null {
@@ -86,6 +102,32 @@ function firstAlert(event: FireEvent): FirstAlert | null {
     const best = carried.reduce((a, b) => (b.score > a.score ? b : a), carried[0]);
     if (best && best.score >= ALERT_SCORE_THRESHOLD) {
       return { atIso: new Date(slot + BUCKET_MS).toISOString(), frpAtAlert: best.maxFrp, passesAtAlert: best.passCount };
+    }
+  }
+  return null;
+}
+
+// shouldAlert()-based reconstruction (lib/replay.ts, exported so this and the
+// fused replay itself never drift apart) — rule (e)'s meteosat branch
+// included. Used only by §7: unlike firstAlert() above, this correctly finds
+// a Meteosat-only event's alerting poll (gated on status, not a score
+// threshold its score can't realistically reach).
+type ReconstructedAlert = { atIso: string; frpAtAlert: number; passesAtAlert: number; positionSourceAtAlert: 'viirs' | 'meteosat' };
+
+function reconstructAlert(event: FireEvent, proximityKm: number): ReconstructedAlert | null {
+  const buckets = new Map<number, typeof event.detections>();
+  for (const d of event.detections) {
+    const slot = Math.floor(Date.parse(d.acquiredAt) / BUCKET_MS) * BUCKET_MS;
+    if (!buckets.has(slot)) buckets.set(slot, []);
+    buckets.get(slot)!.push(d);
+  }
+  let carried: FireEvent[] = [];
+  for (const slot of [...buckets.keys()].sort((a, b) => a - b)) {
+    carried = clusterDetections(buckets.get(slot)!, carried, config.frpThresholdMw);
+    for (const ev of carried) {
+      if (shouldAlert(ev, proximityKm)) {
+        return { atIso: new Date(slot + BUCKET_MS).toISOString(), frpAtAlert: ev.maxFrp, passesAtAlert: ev.passCount, positionSourceAtAlert: ev.positionSource ?? 'viirs' };
+      }
     }
   }
   return null;
@@ -257,9 +299,103 @@ const aug26 = FOCUS.map(w => {
   return { wilaya: w, firstAlertUtc: times[0] ?? null, firstAlertAlgiers: times[0] ? algiersTime(times[0]) : null, alertsThatDay: times.length };
 });
 
+// --- 7. Meteosat's contribution: compare against the ORIGINAL VIIRS-only
+//     replay (--baseline-db/--baseline-out) ----------------------------------
+// Matching two independent runs' events by id is meaningless — Meteosat's
+// wider join radius can merge or split things differently. Geographic
+// nearest-neighbour (<=3km centroid distance) is the practical substitute;
+// same rationale as precisionFor() above, which already does exactly this
+// for village matching.
+type MeteosatComparisonRow = {
+  id: string; wilaya: string; firstDetectionUtc: string; maxFrpMw: number;
+  fusedFirstAlertUtc: string; fusedFirstAlertAlgiers: string;
+  matchedOriginalId: string | null; originalFirstAlertUtc: string | null; originalFirstAlertAlgiers: string | null;
+  savedMinutes: number | null;
+};
+let meteosatComparison: {
+  meteosatFirstCount: number; meteosatFirstStatusNote: string;
+  matched: MeteosatComparisonRow[]; unmatched: MeteosatComparisonRow[];
+  savedMinutes: { count: number; averageMin: number | null; medianMin: number | null };
+} | null = null;
+
+if (baselineDb && baselineOut) {
+  const baselineDbFile = new DatabaseSync(path.resolve(baselineDb), { readOnly: true });
+  const baselineRows = baselineDbFile.prepare('SELECT payload FROM fire_events').all() as { payload: string }[];
+  baselineDbFile.close();
+  const baselineStored = baselineRows.map(r => JSON.parse(r.payload) as FireEvent);
+  const baselineOutJson = JSON.parse(fs.readFileSync(path.join(baselineOut, 'events.json'), 'utf8')) as { id: string; wilaya: string | null; latitude: number; longitude: number; wouldHaveAlerted: boolean }[];
+  const baselineAlertedFull = baselineOutJson.filter(e => e.wouldHaveAlerted).map(e => baselineStored.find(s => s.id === e.id)).filter((e): e is FireEvent => Boolean(e));
+  const baselineFirstAlerts = new Map<string, ReconstructedAlert>();
+  for (const e of baselineAlertedFull) {
+    const first = reconstructAlert(e, config.proximityKm);
+    if (first) baselineFirstAlerts.set(e.id, first);
+  }
+
+  const MATCH_RADIUS_KM = 3;
+  function nearestBaseline(lat: number, lon: number): FireEvent | null {
+    let best: FireEvent | null = null, bestDist = Infinity;
+    for (const b of baselineAlertedFull) {
+      if (!baselineFirstAlerts.has(b.id)) continue;
+      const d = distanceKm(lat, lon, b.latitude, b.longitude);
+      if (d <= MATCH_RADIUS_KM && d < bestDist) { best = b; bestDist = d; }
+    }
+    return best;
+  }
+
+  // This run's own (fused) alerting poll, reconstructed with the SAME
+  // shouldAlert()-based function as the baseline side above — the top-level
+  // `alerts` map (used by §1-6) can't be reused here: it's built with the
+  // old score-threshold-only firstAlert(), which under-detects Meteosat-only
+  // events by design (see that function's comment).
+  const fusedFirstAlerts = new Map<string, ReconstructedAlert>();
+  const focusFusedAlerted = eventsOut.filter(e => e.wouldHaveAlerted && FOCUS.includes(e.wilaya ?? ''));
+  for (const e of focusFusedAlerted) {
+    const full = storedById.get(e.id);
+    if (!full) continue;
+    const first = reconstructAlert(full, config.proximityKm);
+    if (first) fusedFirstAlerts.set(e.id, first);
+  }
+
+  const rows: MeteosatComparisonRow[] = focusFusedAlerted.filter(e => fusedFirstAlerts.has(e.id)).map(e => {
+    const fusedAlert = fusedFirstAlerts.get(e.id)!;
+    const match = nearestBaseline(e.latitude, e.longitude);
+    const originalAlert = match ? baselineFirstAlerts.get(match.id)! : null;
+    return {
+      id: e.id, wilaya: e.wilaya ?? '?', firstDetectionUtc: e.firstDetectionUtc, maxFrpMw: e.maxFrpMw,
+      fusedFirstAlertUtc: fusedAlert.atIso, fusedFirstAlertAlgiers: algiersTime(fusedAlert.atIso),
+      matchedOriginalId: match?.id ?? null,
+      originalFirstAlertUtc: originalAlert?.atIso ?? null,
+      originalFirstAlertAlgiers: originalAlert ? algiersTime(originalAlert.atIso) : null,
+      savedMinutes: originalAlert ? Math.round((Date.parse(originalAlert.atIso) - Date.parse(fusedAlert.atIso)) / 60_000) : null,
+    };
+  });
+  const matched = rows.filter(r => r.matchedOriginalId !== null).sort((a, b) => (b.savedMinutes ?? 0) - (a.savedMinutes ?? 0));
+  const unmatched = rows.filter(r => r.matchedOriginalId === null);
+  const savedValues = matched.map(r => r.savedMinutes!).filter(v => v !== null);
+  const meteosatFirstIds = focusFusedAlerted.filter(e => fusedFirstAlerts.get(e.id)?.positionSourceAtAlert === 'meteosat').map(e => e.id);
+
+  meteosatComparison = {
+    meteosatFirstCount: meteosatFirstIds.length,
+    // Rule (e), locked (lib/fire-monitor.ts scoreEvent): a Meteosat-only
+    // event's status can only ever be 'observation' or 'corroborated', and
+    // shouldAlert's meteosat branch requires status === 'corroborated'
+    // exactly — so by construction every one of these alerts is
+    // 'corroborated', never 'urgent'. Not a distribution to compute; a fact
+    // to state.
+    meteosatFirstStatusNote: `${meteosatFirstIds.length}/${meteosatFirstIds.length} au statut 'corroborated' — jamais 'urgent' par construction de la règle (e) (voir lib/fire-monitor.ts).`,
+    matched, unmatched,
+    savedMinutes: {
+      count: savedValues.length,
+      averageMin: savedValues.length ? Math.round(savedValues.reduce((a, b) => a + b, 0) / savedValues.length) : null,
+      medianMin: quantile(savedValues, 0.5),
+    },
+  };
+}
+
 const metrics = {
   generatedAt: new Date().toISOString(),
   source: { events: eventsOut.length, alerted: alertedIds.length, db: dbPath },
+  ...(meteosatComparison ? { meteosatComparison } : {}),
   calibration,
   earlyWeakSignal: { count: earlyWeak.length, top10: earlyWeak.slice(0, 10) },
   bigOnFirstSight: { count: firstSightBig.length, top10: firstSightBig.slice(0, 10) },
@@ -332,6 +468,36 @@ L.push('- **Les feux manqués ne sont pas mesurés**, seulement approchés par l
 L.push(`- **29 événements hors frontières** (Maroc, Tunisie, Méditerranée, Espagne) sont exclus des comptes par wilaya : l'emprise FIRMS est un rectangle plus large que l'Algérie.`);
 L.push('- **Aucune vérification terrain.** Rien dans ce document ne dit qu\'un feu a réellement eu lieu à l\'endroit indiqué : ce sont des anomalies thermiques satellitaires, corroborées entre elles au mieux.');
 L.push('');
+
+if (meteosatComparison) {
+  const mc = meteosatComparison;
+  L.push('## 7. Apport de Meteosat (MTG_FIR) — comparé au rejeu VIIRS seul', '');
+  L.push(`Ce rejeu fusionne VIIRS et Meteosat (EUMDAC, collection EO:EUM:DAT:0801) sur la même fenêtre. Comparaison géographique (<=3km) contre le rejeu VIIRS seul (\`${baselineDb}\`) : sur les ${mc.matched.length + mc.unmatched.length} événements alertés de ce rejeu dans ${FOCUS.join(', ')}, **${mc.matched.length}** ont un événement correspondant dans le rejeu original, ${mc.unmatched.length} n'en ont aucun (VIIRS n'a jamais alerté ce feu sur toute la fenêtre du rejeu original).`, '');
+  L.push(`**${mc.meteosatFirstCount} événements** ont eu leur toute première alerte déclenchée par Meteosat seul (règle e), avant qu'aucun passage VIIRS n'existe encore sur cet événement — c'est la réponse directe à « combien de l'angle mort Meteosat a-t-il comblé ». ${mc.meteosatFirstStatusNote}`, '');
+  if (mc.savedMinutes.count > 0) {
+    L.push(`Sur les ${mc.savedMinutes.count} événements appariés avec un gain positif : gain moyen **${mc.savedMinutes.averageMin} min**, médian **${mc.savedMinutes.medianMin} min** avant la première alerte du rejeu VIIRS seul.`, '');
+  } else {
+    L.push('Aucun événement apparié n\'a un gain de temps positif mesurable sur cette fenêtre.', '');
+  }
+  L.push('| Wilaya | Détection (Alger) | Pic FRP | Alerte fusionnée (Alger) | Alerte VIIRS seul (Alger) | Gain |', '|---|---|---:|---|---|---:|');
+  for (const r of mc.matched.slice(0, 15)) {
+    L.push(`| ${r.wilaya} | ${algiersTime(r.firstDetectionUtc)} | ${r.maxFrpMw.toFixed(1)} MW | ${r.fusedFirstAlertAlgiers} | ${r.originalFirstAlertAlgiers} | ${r.savedMinutes !== null ? `${r.savedMinutes} min` : '—'} |`);
+  }
+  L.push('');
+  if (mc.unmatched.length) {
+    L.push(`**${mc.unmatched.length} événements alertés par ce rejeu n'ont aucune correspondance dans le rejeu VIIRS seul** — VIIRS ne les a détectés à aucun moment de la fenêtre (ou jamais assez pour alerter) :`, '');
+    L.push('| Wilaya | Détection (Alger) | Pic FRP | Alerte fusionnée (Alger) |', '|---|---|---:|---|');
+    for (const r of mc.unmatched.slice(0, 15)) L.push(`| ${r.wilaya} | ${algiersTime(r.firstDetectionUtc)} | ${r.maxFrpMw.toFixed(1)} MW | ${r.fusedFirstAlertAlgiers} |`);
+    L.push('');
+  }
+  L.push('**Honnêteté :**', '');
+  L.push('- **Signal 2 (anomalie FRP vs historique) : contribution quasi nulle, comme attendu.** La table `frp_history` part vide au début de ce rejeu ; voir `run-notes.md` pour le compte exact d\'événements alertés ayant malgré tout atteint le seuil (une cellule touchée plusieurs jours consécutifs pendant ce rejeu même).');
+  L.push('- **Signaux 1 et 3, quantifiés séparément** (comptes sur les événements alertés, `run-notes.md`) : le bonus de zonage (signal 1, proximité d\'un village) et le bonus de persistance Meteosat (signal 3, un événement déjà confirmé VIIRS avec ≥2 passages Meteosat) sont deux bonus de SCORE additifs — ils avancent une alerte VIIRS qui aurait de toute façon eu lieu, ils ne créent pas une alerte qui n\'existait pas. Les alertes déclenchées "par Meteosat seul" ci-dessus (règle e) sont un mécanisme différent et sont celles qui répondent réellement à "combien de feux Meteosat a-t-il fait connaître en premier".');
+  L.push('- **Le rapprochement géographique (<=3km) est une approximation**, pas un identifiant stable : un même feu peut être un seul événement dans un rejeu et deux dans l\'autre (le rayon de jonction de Meteosat diffère de celui de VIIRS). Les gains de temps ci-dessus sont donc indicatifs, pas une vérité absolue événement-par-événement.');
+  L.push('- **Aucune vérification terrain non plus ici** : un gain de temps mesuré est un gain de temps entre deux rejeux hors ligne du même moteur, pas une preuve qu\'un incendie réel a été signalé plus tôt à quelqu\'un.');
+  L.push('');
+}
+
 fs.writeFileSync(path.join(outDir, 'metrics.md'), L.join('\n'));
 
 console.log(`Wrote ${outDir}/metrics.md and metrics.json — ${earlyWeak.length} early-weak-signal, ${nightIds.length}/${alertedIds.length} night, ${pressFound}/${PRESS_VILLAGES.length} press villages.`);
