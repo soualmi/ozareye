@@ -20,7 +20,7 @@
 // prompted this had the 🏭 note correct but buried below the narrative.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { eventTitle, nearestFeatureLine, summaryLine, toDashboardEvent } from './dashboard-view';
+import { applyDisplayFilters, DEFAULT_DISPLAY_FILTERS, eventTitle, isDisplayed, nearestFeatureLine, summaryLine, toDashboardEvent, type DisplayFilters } from './dashboard-view';
 import { magnitudeLabel, type Detection, type FireEvent } from './fire-monitor';
 
 test('eventTitle: industrial context leads with the site, not "probablement un feu"', () => {
@@ -155,4 +155,73 @@ test('toDashboardEvent: nearest-station fields resolve from the real index and t
   assert.ok(typeof ev.nearestStationDistanceKm === 'number' && ev.nearestStationDistanceKm >= 0);
   assert.ok(ev.nearestStationPhone === null || typeof ev.nearestStationPhone === 'string');
   assert.match(ev.summaryLine!, /caserne la plus proche à (<1|\d+) km\.$/);
+});
+
+// --- Display filters (weak-signal + industrial + border, combinable) -------
+
+type F = { id: string; status: 'observation' | 'corroborated' | 'urgent'; landUseContext?: 'industrial' | 'natural' | 'unknown'; wilaya: string | null };
+const indUrgent: F = { id: 'ind-urgent', status: 'urgent', landUseContext: 'industrial', wilaya: 'Skikda' };
+const indCorrob: F = { id: 'ind-corrob', status: 'corroborated', landUseContext: 'industrial', wilaya: 'Jijel' };
+const indWeak: F = { id: 'ind-weak', status: 'observation', landUseContext: 'industrial', wilaya: 'Jijel' };
+const natUrgent: F = { id: 'nat-urgent', status: 'urgent', landUseContext: 'natural', wilaya: 'Sétif' };
+const natWeak: F = { id: 'nat-weak', status: 'observation', landUseContext: 'natural', wilaya: 'Sétif' };
+const noCtxCorrob: F = { id: 'noctx-corrob', status: 'corroborated', wilaya: 'Béjaïa' };
+const atSea: F = { id: 'at-sea', status: 'corroborated', landUseContext: 'natural', wilaya: null };
+const ALL = [indUrgent, indCorrob, indWeak, natUrgent, natWeak, noCtxCorrob, atSea];
+const ids = (list: F[]) => list.map(e => e.id);
+const f = (o: Partial<DisplayFilters>): DisplayFilters => ({ ...DEFAULT_DISPLAY_FILTERS, ...o });
+
+test('displayFilters: defaults hide weak signals AND industrial sites, keep border-crossers', () => {
+  assert.deepEqual(DEFAULT_DISPLAY_FILTERS, { showWeakSignals: false, showIndustrial: false, hideUnknownWilaya: false });
+  assert.deepEqual(ids(applyDisplayFilters(ALL, DEFAULT_DISPLAY_FILTERS)), ['nat-urgent', 'noctx-corrob', 'at-sea']);
+});
+
+test('displayFilters: a corroborated/urgent industrial event is hidden when the box is unchecked, shown when checked', () => {
+  assert.equal(isDisplayed(indUrgent, f({ showIndustrial: false })), false);
+  assert.equal(isDisplayed(indCorrob, f({ showIndustrial: false })), false);
+  assert.equal(isDisplayed(indUrgent, f({ showIndustrial: true })), true);
+  assert.equal(isDisplayed(indCorrob, f({ showIndustrial: true })), true);
+});
+
+test('displayFilters: a non-industrial event is unaffected by the industrial box regardless of state', () => {
+  for (const ev of [natUrgent, noCtxCorrob, atSea]) {
+    assert.equal(isDisplayed(ev, f({ showIndustrial: false })), isDisplayed(ev, f({ showIndustrial: true })), ev.id);
+    assert.equal(isDisplayed(ev, f({ showIndustrial: false })), true, ev.id);
+  }
+  // and the weak natural one is governed by the weak box only
+  assert.equal(isDisplayed(natWeak, f({ showIndustrial: false, showWeakSignals: true })), true);
+  assert.equal(isDisplayed(natWeak, f({ showIndustrial: true, showWeakSignals: false })), false);
+});
+
+test('displayFilters: both opt-ins unchecked hides the UNION (weak ∪ industrial), not just one', () => {
+  const hidden = ids(ALL.filter(e => !isDisplayed(e, f({ showWeakSignals: false, showIndustrial: false }))));
+  assert.deepEqual(hidden, ['ind-urgent', 'ind-corrob', 'ind-weak', 'nat-weak']);
+  // an event in BOTH sets needs BOTH boxes ticked
+  assert.equal(isDisplayed(indWeak, f({ showWeakSignals: true, showIndustrial: false })), false);
+  assert.equal(isDisplayed(indWeak, f({ showWeakSignals: false, showIndustrial: true })), false);
+  assert.equal(isDisplayed(indWeak, f({ showWeakSignals: true, showIndustrial: true })), true);
+});
+
+test('displayFilters: all four combinations of the two boxes — list and map get the same single set, and each combination is exact', () => {
+  const expected: Record<string, string[]> = {
+    'weak=0,ind=0': ['nat-urgent', 'noctx-corrob', 'at-sea'],
+    'weak=1,ind=0': ['nat-urgent', 'nat-weak', 'noctx-corrob', 'at-sea'],
+    'weak=0,ind=1': ['ind-urgent', 'ind-corrob', 'nat-urgent', 'noctx-corrob', 'at-sea'],
+    'weak=1,ind=1': ids(ALL),
+  };
+  for (const showWeakSignals of [false, true]) {
+    for (const showIndustrial of [false, true]) {
+      const filters = f({ showWeakSignals, showIndustrial });
+      const forList = applyDisplayFilters(ALL, filters);
+      const forMap = applyDisplayFilters(ALL, filters);
+      const key = `weak=${+showWeakSignals},ind=${+showIndustrial}`;
+      assert.deepEqual(ids(forList), expected[key], key);
+      assert.deepEqual(ids(forMap), ids(forList), `${key}: map marker set must equal the list`);
+    }
+  }
+});
+
+test('displayFilters: the border box still composes on top (hidden if ANY active filter rejects)', () => {
+  assert.deepEqual(ids(applyDisplayFilters(ALL, f({ showWeakSignals: true, showIndustrial: true, hideUnknownWilaya: true }))), ['ind-urgent', 'ind-corrob', 'ind-weak', 'nat-urgent', 'nat-weak', 'noctx-corrob']);
+  assert.deepEqual(ids(applyDisplayFilters(ALL, f({ hideUnknownWilaya: true }))), ['nat-urgent', 'noctx-corrob']);
 });

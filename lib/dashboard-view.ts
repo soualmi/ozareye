@@ -85,6 +85,38 @@ export function summaryLine(passCount: number, wilaya: string | null, nearestVil
   return `${head}${where}${caveat}${station}.`;
 }
 
+// The dashboard's display filters, as one pure function so the list and
+// the map are fed the SAME set (page.tsx calls this once and passes the
+// result to both) and so the combinations are unit-testable. Every filter
+// here is display-only — "marquer, pas masquer": detection, scoring,
+// storage and Telegram never see these flags. Hide-rules combine with OR:
+// an event is hidden if ANY active filter rejects it, so an industrial
+// event that is also 'observation' stays hidden until BOTH opt-in boxes
+// are ticked.
+export type DisplayFilters = {
+  /** Opt IN: 'observation' (single-pass) events are hidden until true. */
+  showWeakSignals: boolean;
+  /** Opt IN: landUseContext === 'industrial' events are hidden until true. */
+  showIndustrial: boolean;
+  /** Opt OUT: events with no wilaya (at sea / across a border) hidden when true. */
+  hideUnknownWilaya: boolean;
+};
+
+export const DEFAULT_DISPLAY_FILTERS: DisplayFilters = { showWeakSignals: false, showIndustrial: false, hideUnknownWilaya: false };
+
+type Filterable = { status: 'observation' | 'corroborated' | 'urgent'; landUseContext?: LandUseContext; wilaya: string | null };
+
+export function isDisplayed(event: Filterable, f: DisplayFilters): boolean {
+  if (!f.showWeakSignals && event.status === 'observation') return false;
+  if (!f.showIndustrial && event.landUseContext === 'industrial') return false;
+  if (f.hideUnknownWilaya && event.wilaya === null) return false;
+  return true;
+}
+
+export function applyDisplayFilters<T extends Filterable>(events: T[], f: DisplayFilters): T[] {
+  return events.filter(e => isDisplayed(e, f));
+}
+
 export function toDashboardEvent(event: FireEvent, referenceTime: Date = new Date(), frpThresholdMw?: number, proximityKm?: number) {
   const last = event.detections[event.detections.length - 1];
   const isIndustrial = event.landUse?.context === 'industrial';

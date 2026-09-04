@@ -24,7 +24,7 @@ import EmergencyNumbers from '@/components/dashboard/EmergencyNumbers';
 import StationLine from '@/components/dashboard/StationLine';
 import { formatDetectedAgo, wilayaLabel } from '@/components/dashboard/format';
 import { displayName } from '@/lib/place-name';
-import { nearestFeatureLine } from '@/lib/dashboard-view';
+import { applyDisplayFilters, nearestFeatureLine } from '@/lib/dashboard-view';
 import type { DashboardEvent, SourceStatus } from '@/components/dashboard/types';
 
 const DashboardMap = dynamic(() => import('@/components/dashboard/Map'), { ssr: false, loading: () => <div className="grid h-full place-items-center text-sm text-[#8da79d]">Chargement de la carte…</div> });
@@ -55,6 +55,11 @@ export default function Dashboard() {
   // just inverted because a first-time visitor should see the corroborated/
   // urgent picture first. 'corroborated' and 'urgent' always show.
   const [showWeakSignals, setShowWeakSignals] = useState(false);
+  // Same pattern, independent box: known industrial sites (usines,
+  // carrières, torchères — landUseContext 'industrial') are hidden by
+  // default too. The two opt-ins combine (see applyDisplayFilters): an
+  // industrial event that is also 'observation' needs both ticked.
+  const [showIndustrial, setShowIndustrial] = useState(false);
 
   const [historyFrom, setHistoryFrom] = useState(() => new Date(Date.now() - 7 * 86_400_000).toISOString().slice(0, 10));
   const [historyTo, setHistoryTo] = useState(() => new Date().toISOString().slice(0, 10));
@@ -130,9 +135,9 @@ export default function Dashboard() {
 
   const loaded = tab === 'live' ? events : historyEvents;
   const weakCount = loaded.filter(e => e.status === 'observation').length;
-  const visible = loaded
-    .filter(e => showWeakSignals || e.status !== 'observation')
-    .filter(e => !hideUnknownWilaya || e.wilaya !== null);
+  const industrialCount = loaded.filter(e => e.landUseContext === 'industrial').length;
+  // One filtered set for BOTH the list and the map — never two computations.
+  const visible = applyDisplayFilters(loaded, { showWeakSignals, showIndustrial, hideUnknownWilaya });
   const unknownWilayaCount = loaded.filter(e => e.wilaya === null).length;
   const repeatedCount = visible.filter(e => e.passCount >= 2).length;
   const hiddenCount = loaded.length - visible.length;
@@ -251,6 +256,13 @@ export default function Dashboard() {
         <label className="flex items-center gap-2 border-b border-white/10 px-3 py-2 text-[11px] text-[#8da79d]">
           <input type="checkbox" checked={showWeakSignals} onChange={e => setShowWeakSignals(e.target.checked)} className="accent-[#45d892]" data-testid="show-weak-signals" />
           Afficher aussi les signaux faibles (observation, un seul passage){weakCount > 0 ? ` (${weakCount})` : ''}
+        </label>
+
+        {/* Independent opt-in for known industrial sites — display only,
+            combinable with the box above (hide if EITHER is unticked). */}
+        <label className="flex items-center gap-2 border-b border-white/10 px-3 py-2 text-[11px] text-[#8da79d]">
+          <input type="checkbox" checked={showIndustrial} onChange={e => setShowIndustrial(e.target.checked)} className="accent-[#45d892]" data-testid="show-industrial" />
+          Afficher les sites industriels connus (usines, carrières, torchères){industrialCount > 0 ? ` (${industrialCount})` : ''}
         </label>
 
         {/* Item 4: marquer, pas masquer — off by default, so an out-of-bounds
