@@ -17,9 +17,11 @@
 'use client';
 
 import dynamic from 'next/dynamic';
-import { Settings } from 'lucide-react';
+import { Globe, Settings } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import EventDetail from '@/components/dashboard/EventDetail';
+import EmergencyNumbers from '@/components/dashboard/EmergencyNumbers';
+import StationLine from '@/components/dashboard/StationLine';
 import { formatDetectedAgo, wilayaLabel } from '@/components/dashboard/format';
 import { displayName } from '@/lib/place-name';
 import { nearestFeatureLine } from '@/lib/dashboard-view';
@@ -46,6 +48,13 @@ export default function Dashboard() {
   const [sources, setSources] = useState<SourceStatus[]>([]);
   const [panelOpen, setPanelOpen] = useState(true);
   const [hideUnknownWilaya, setHideUnknownWilaya] = useState(false);
+  // Weak signals (status 'observation' — one pass, the green dots) are
+  // HIDDEN by default and shown only when the reader opts in. Display
+  // filter only: the events are still stored, scored and alerted exactly as
+  // before — "marquer, pas masquer", same principle as the border checkbox,
+  // just inverted because a first-time visitor should see the corroborated/
+  // urgent picture first. 'corroborated' and 'urgent' always show.
+  const [showWeakSignals, setShowWeakSignals] = useState(false);
 
   const [historyFrom, setHistoryFrom] = useState(() => new Date(Date.now() - 7 * 86_400_000).toISOString().slice(0, 10));
   const [historyTo, setHistoryTo] = useState(() => new Date().toISOString().slice(0, 10));
@@ -120,9 +129,13 @@ export default function Dashboard() {
   }, [authChecked, tab, historyFrom, historyTo]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loaded = tab === 'live' ? events : historyEvents;
-  const visible = hideUnknownWilaya ? loaded.filter(e => e.wilaya !== null) : loaded;
+  const weakCount = loaded.filter(e => e.status === 'observation').length;
+  const visible = loaded
+    .filter(e => showWeakSignals || e.status !== 'observation')
+    .filter(e => !hideUnknownWilaya || e.wilaya !== null);
   const unknownWilayaCount = loaded.filter(e => e.wilaya === null).length;
   const repeatedCount = visible.filter(e => e.passCount >= 2).length;
+  const hiddenCount = loaded.length - visible.length;
   const downSource = sources.find(s => !s.ok);
   const detailEvent = useMemo(() => visible.find(e => e.id === detailId) ?? null, [visible, detailId]);
 
@@ -137,7 +150,7 @@ export default function Dashboard() {
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-[#07120f] text-[#edf5ef]">
       <div className="absolute inset-0">
-        <DashboardMap events={tab === 'live' ? events : historyEvents} selectedId={selectedId} onSelect={selectOnly} onDetail={showDetail} />
+        <DashboardMap events={visible} selectedId={selectedId} onSelect={selectOnly} onDetail={showDetail} />
       </div>
 
       {/* Item 9: an open watchdog incident is the one thing that silently
@@ -187,6 +200,12 @@ export default function Dashboard() {
           <a href="/setup" aria-label="Configuration" title="Configuration" className="flex shrink-0 items-center gap-1.5 rounded-xl border border-white/10 bg-[#07120f]/90 px-2.5 py-2 text-xs text-[#8da79d] backdrop-blur hover:text-[#edf5ef] min-[480px]:px-3">
             <Settings size={14} /> <span className="hidden min-[480px]:inline">Configuration</span>
           </a>
+          {/* Country/region switch: the /setup flow already handles it
+              (country → bbox → index build); this just surfaces it where a
+              reader would look for it instead of behind "Configuration". */}
+          <a href="/setup" aria-label="Changer de pays / région" title="Changer de pays / région" className="flex shrink-0 items-center gap-1.5 rounded-xl border border-white/10 bg-[#07120f]/90 px-2.5 py-2 text-xs text-[#8da79d] backdrop-blur hover:text-[#edf5ef] min-[480px]:px-3">
+            <Globe size={14} /> <span className="hidden min-[480px]:inline">Changer de pays / région</span>
+          </a>
         </div>
       </div>
 
@@ -224,6 +243,16 @@ export default function Dashboard() {
           </div>
         )}
 
+        {/* Always-visible, static: the 5 verified national emergency numbers. */}
+        <EmergencyNumbers />
+
+        {/* Weak signals hidden by default — inverse of the border checkbox
+            below (opt IN to see them). Display filter only, see showWeakSignals. */}
+        <label className="flex items-center gap-2 border-b border-white/10 px-3 py-2 text-[11px] text-[#8da79d]">
+          <input type="checkbox" checked={showWeakSignals} onChange={e => setShowWeakSignals(e.target.checked)} className="accent-[#45d892]" data-testid="show-weak-signals" />
+          Afficher aussi les signaux faibles (observation, un seul passage){weakCount > 0 ? ` (${weakCount})` : ''}
+        </label>
+
         {/* Item 4: marquer, pas masquer — off by default, so an out-of-bounds
             detection is visible and labelled unless the reader opts out. */}
         <label className="flex items-center gap-2 border-b border-white/10 px-3 py-2 text-[11px] text-[#8da79d]">
@@ -232,9 +261,11 @@ export default function Dashboard() {
         </label>
 
         {/* Item 10: "Confirmés au sol" is structurally 0 — this system has no
-            ground-truth input — and is shown to make that absence explicit. */}
+            ground-truth input — and is shown to make that absence explicit.
+            The counts are of what is actually SHOWN (after both filters); the
+            hidden remainder is stated so a quiet list never reads as "no data". */}
         <div className="border-b border-white/10 px-3 py-2 text-[11px] text-[#8da79d]">
-          Observations : {visible.length} · Signaux répétés (≥2 passages) : {repeatedCount} · Confirmés au sol : 0
+          Affichés : {visible.length} · Signaux répétés (≥2 passages) : {repeatedCount} · Confirmés au sol : 0{hiddenCount > 0 ? ` · Masqués par les filtres : ${hiddenCount}` : ''}
         </div>
 
         <div className="flex-1 overflow-y-auto">
@@ -268,8 +299,14 @@ function EventList({ events, onSelect, emptyMessage }: { events: DashboardEvent[
               </span>
               <span className="text-xs text-[#8da79d]">{ev.detectedAtAlgiers}</span>
             </div>
+            {/* One plain sentence first (industrial events carry their
+                lead line instead — never both). Then the technical fields. */}
+            {ev.industrialLeadLine
+              ? <p className="mt-1 text-xs text-[#f5d98a]">🏭 {ev.industrialLeadLine}</p>
+              : ev.summaryLine && <p className="mt-1 text-xs text-[#edf5ef]">{ev.summaryLine}</p>}
             <p className="mt-1 text-xs text-[#8da79d]">FRP {ev.maxFrp.toFixed(1)}MW{nearestLine ? ` · ${nearestLine}` : ''}</p>
             <p className="mt-1 text-[11px] text-[#8da79d]">{ev.sourceStatusLine}</p>
+            {ev.nearestStationLine && <p className="mt-1 text-[11px] text-[#c9dbd3]"><StationLine event={ev} /></p>}
             {/* /history measures age from the event's own last pass, so its
                 events carry ageMinutes 0 — the absolute time is always shown,
                 the elapsed time only when it is a real one. */}

@@ -56,4 +56,15 @@ export type DashboardEvent = {
   positionSource: 'viirs' | 'meteosat' | 'slstr';
   positionUncertaintyKm?: number;
   geoTracked: boolean;
+  // Nearest caserne (lib/firestation.ts, local OSM index). All three absent
+  // when the index didn't resolve — the line is simply not rendered. Phone
+  // is the station's own OSM tag or null; the UI falls back to the generic
+  // Protection Civile number so the link is always callable.
+  nearestStationLine?: string;
+  nearestStationPhone?: string | null;
+  nearestStationDistanceKm?: number;
+  // One plain sentence for a first-time visitor (lib/dashboard-view.ts
+  // summaryLine); absent for industrial events, whose industrialLeadLine
+  // already plays that role.
+  summaryLine?: string;
 };

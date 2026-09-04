@@ -17,6 +17,7 @@
 import { blowsTowardDeg, cardinalFr } from '@/lib/wind';
 import { displayName } from '@/lib/place-name';
 import { formatAge, formatDetectedAgo, wilayaLabel } from './format';
+import StationLine from './StationLine';
 import type { DashboardEvent } from './types';
 
 // Dashboard-only narrative rendering. Every value below comes straight off
@@ -64,6 +65,18 @@ export default function EventDetail({ event, onBack }: { event: DashboardEvent; 
         <div className="mb-3 rounded-xl border border-[#f5b942]/40 bg-[#f5b942]/10 p-3 text-xs text-[#f5d98a]">
           🏭 {event.industrialLeadLine}
         </div>
+      )}
+
+      {/* 1c. One plain sentence for a first-time visitor — above every
+          technical field. Non-industrial events only: the industrial lead
+          line above already is that sentence for the others. */}
+      {!event.industrialLeadLine && event.summaryLine && (
+        <p data-testid="summary-line" className="mb-3 rounded-xl border border-[#63dda0]/30 bg-[#63dda0]/10 p-3 text-sm font-medium text-[#edf5ef]">{event.summaryLine}</p>
+      )}
+
+      {/* 1d. Nearest caserne + a number that is always callable. */}
+      {event.nearestStationLine && (
+        <p className="mb-3 rounded-lg border border-white/10 bg-[#07130f] px-3 py-2 text-xs text-[#c9dbd3]"><StationLine event={event} /></p>
       )}
 
       {/* Item 2: what the passes actually establish. Repetition proves the

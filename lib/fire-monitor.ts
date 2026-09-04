@@ -19,6 +19,7 @@ import { distanceKm } from './geo';
 import { cardinalFr, classifyExposure, type WindRelation } from './wind';
 import { isolatedDisplayName, stripTifinagh } from './place-name';
 import { wilayaAt } from './wilaya';
+import { nearestFireStation, nearestStationLine } from './firestation';
 
 // Real point-in-polygon wilaya attribution for a fire centroid — used both for
 // message display and for per-wilaya routing (Part C). Replaces the earlier
@@ -997,6 +998,12 @@ export function telegramText(event: FireEvent, referenceTime = new Date(), proxi
   // VIIRS, say so plainly in the line itself rather than leaving the reader
   // to guess which sensor measured it.
   const frpBit = lastIsMeteosat ? '' : lastIsSlstr ? ` · puissance détectée (Sentinel-3) : ${event.maxFrp.toFixed(1)} MW` : ` · puissance détectée : ${event.maxFrp.toFixed(1)} MW`;
+  // Nearest caserne (local OSM index, lib/firestation.ts) — name + distance
+  // only, one short line. No phone number here on purpose: tel: links don't
+  // work in Telegram text, the dashboard carries the callable number. Absent
+  // entirely when the index didn't resolve.
+  const stationLine = nearestStationLine(nearestFireStation(event.latitude, event.longitude));
+  const stationBit = stationLine ? `\n🚒 ${stationLine}` : '';
 
-  return `${icon} ${LABELS.headline} — À VÉRIFIER\n\n${meteosatOnlyBit}${slstrOnlyBit}${geoTrackedBit}${industrialBit}${villageLines}\n\n📍${event.latitude.toFixed(4)},${event.longitude.toFixed(4)}${locationBit} ${algiersTime(event.lastAcquiredAt)} (Alger, il y a ${formatElapsed(ageMin)}) · ${lastDetection.instrument}${frpBit}\nPreuves : ${evidenceLine(event)}\n\n⚠️${LABELS.disclaimer}\n${creditsLine(event)}`;
+  return `${icon} ${LABELS.headline} — À VÉRIFIER\n\n${meteosatOnlyBit}${slstrOnlyBit}${geoTrackedBit}${industrialBit}${villageLines}\n\n📍${event.latitude.toFixed(4)},${event.longitude.toFixed(4)}${locationBit} ${algiersTime(event.lastAcquiredAt)} (Alger, il y a ${formatElapsed(ageMin)}) · ${lastDetection.instrument}${frpBit}\nPreuves : ${evidenceLine(event)}${stationBit}\n\n⚠️${LABELS.disclaimer}\n${creditsLine(event)}`;
 }

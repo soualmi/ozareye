@@ -24,7 +24,8 @@ import {
   type FireEvent, type LandUseContext,
 } from './fire-monitor';
 import { satelliteName } from './satellite-names';
-import { withDisplayName } from './place-name';
+import { displayName, withDisplayName } from './place-name';
+import { nearestFireStation, nearestStationLine } from './firestation';
 
 // frpThresholdMw/proximityKm default to the engine's own defaults but should
 // normally be passed in from the current config (see /api/dashboard/events
@@ -62,13 +63,42 @@ export function nearestFeatureLine(context: LandUseContext | undefined, siteName
   return nearestVillageName ? `près de ${nearestVillageName}` : undefined;
 }
 
+// ONE plain sentence a first-time visitor understands in 3 seconds, shown
+// above every technical field. Same tone as sourceStatusLine(): never "feu
+// détecté", never "confirmé" — "anomalie thermique probable" for a single
+// pass, "signal thermique répété" for 2+, always "non confirmé(e) au sol".
+// Location is the nearest village (when the exposure selection has one)
+// and/or the wilaya; the closing clause is the nearest caserne's distance
+// when the local index resolved one. Every piece is optional and the
+// sentence still reads whole when any of them is missing. Industrial events
+// don't get one: industrialLeadLine() already plays this role and leads the
+// detail/popup/card, so this would only duplicate it.
+export function summaryLine(passCount: number, wilaya: string | null, nearestVillageName: string | undefined, stationDistanceKm: number | undefined): string {
+  const repeated = passCount >= 2;
+  const head = repeated ? 'Signal thermique répété' : 'Anomalie thermique probable';
+  const where = nearestVillageName && wilaya ? ` près de ${nearestVillageName} (${wilaya})`
+    : nearestVillageName ? ` près de ${nearestVillageName}`
+    : wilaya ? ` dans la wilaya de ${wilaya}`
+    : '';
+  const caveat = repeated ? ', non confirmé au sol' : ', non confirmée au sol';
+  const station = stationDistanceKm !== undefined ? ` — caserne la plus proche à ${stationDistanceKm < 1 ? '<1' : Math.round(stationDistanceKm)} km` : '';
+  return `${head}${where}${caveat}${station}.`;
+}
+
 export function toDashboardEvent(event: FireEvent, referenceTime: Date = new Date(), frpThresholdMw?: number, proximityKm?: number) {
   const last = event.detections[event.detections.length - 1];
   const isIndustrial = event.landUse?.context === 'industrial';
+  const selection = selectExposedVillages(event, proximityKm).map(s => ({ ...s, village: withDisplayName(s.village) }));
+  // Nearest caserne from the local index (lib/firestation.ts) — null when
+  // the index is missing, in which case none of the three fields are sent
+  // and every surface simply omits the line. The phone is the station's own
+  // OSM tag or null; the client decides the fallback number, not this layer.
+  const station = nearestFireStation(event.latitude, event.longitude);
+  const wilaya = eventWilaya(event);
   return {
     id: event.id,
     latitude: event.latitude, longitude: event.longitude,
-    wilaya: eventWilaya(event),
+    wilaya,
     status: event.status, score: event.score,
     maxFrp: event.maxFrp, instrument: last.instrument, satellite: satelliteName(last.satellite),
     detectedAtIso: event.lastAcquiredAt, detectedAtAlgiers: algiersTime(event.lastAcquiredAt),
@@ -81,7 +111,7 @@ export function toDashboardEvent(event: FireEvent, referenceTime: Date = new Dat
     passes: distinctPasses(event).map(p => ({ ...p, satellite: satelliteName(p.satellite), acquiredAtAlgiers: algiersTime(p.acquiredAt) })),
     evidenceLine: evidenceLine(event),
     credits: creditsLine(event),
-    selection: selectExposedVillages(event, proximityKm).map(s => ({ ...s, village: withDisplayName(s.village) })),
+    selection,
     disclaimer: LABELS.disclaimer,
     landUseContext: event.landUse?.context,
     landUseSiteName: event.landUse?.siteName,
@@ -90,5 +120,9 @@ export function toDashboardEvent(event: FireEvent, referenceTime: Date = new Dat
     positionSource: event.positionSource ?? 'viirs',
     positionUncertaintyKm: event.positionUncertaintyKm,
     geoTracked: event.geoTracked ?? false,
+    nearestStationLine: nearestStationLine(station),
+    nearestStationPhone: station?.phone ?? null,
+    nearestStationDistanceKm: station ? Number(station.distanceKm.toFixed(1)) : undefined,
+    summaryLine: isIndustrial ? undefined : summaryLine(event.passCount, wilaya, selection[0] ? displayName(selection[0].village) : undefined, station?.distanceKm),
   };
 }

@@ -24,6 +24,7 @@ import { blowsTowardDeg } from '@/lib/wind';
 import { displayName } from '@/lib/place-name';
 import { formatAge, wilayaLabel } from './format';
 import Legend from './Legend';
+import StationLine from './StationLine';
 import type { DashboardEvent, VillageBase } from './types';
 
 const VILLAGE_ZOOM_THRESHOLD = 11;
@@ -148,6 +149,7 @@ function FirePopup({ event, onDetail }: { event: DashboardEvent; onDetail: (id: 
       {/* Industrial context leads, right under the title — same hierarchy
           fix as the detail panel, not a note trailing at the bottom. */}
       {event.industrialLeadLine && <div style={{ marginTop: 4, color: '#f5b942' }}>🏭 {event.industrialLeadLine}</div>}
+      {!event.industrialLeadLine && event.summaryLine && <div style={{ marginTop: 4, fontWeight: 600 }}>{event.summaryLine}</div>}
       {event.positionSource === 'meteosat' && (
         <div style={{ marginTop: 4, color: '#8da79d' }}>🛰 Position approximative Meteosat (±{(event.positionUncertaintyKm ?? 3).toFixed(1)}km), non confirmé par satellite polaire</div>
       )}
@@ -161,6 +163,7 @@ function FirePopup({ event, onDetail }: { event: DashboardEvent; onDetail: (id: 
       <div>Détectée il y a {formatAge(event.ageMinutes)}</div>
       <div style={{ marginTop: 4 }}>{event.sourceStatusLine}</div>
       <div>{proximityCount} village(s) à proximité, {downwindCount} sous le vent</div>
+      {event.nearestStationLine && <div style={{ marginTop: 4 }}><StationLine event={event} compact /></div>}
       <button
         onClick={() => onDetail(event.id)}
         style={{ marginTop: 6, width: '100%', border: 'none', borderRadius: 6, background: '#45d892', color: '#062017', fontWeight: 600, padding: '5px 8px', cursor: 'pointer' }}

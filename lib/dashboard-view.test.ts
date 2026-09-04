@@ -20,7 +20,7 @@
 // prompted this had the 🏭 note correct but buried below the narrative.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { eventTitle, nearestFeatureLine, toDashboardEvent } from './dashboard-view';
+import { eventTitle, nearestFeatureLine, summaryLine, toDashboardEvent } from './dashboard-view';
 import { magnitudeLabel, type Detection, type FireEvent } from './fire-monitor';
 
 test('eventTitle: industrial context leads with the site, not "probablement un feu"', () => {
@@ -113,4 +113,46 @@ test('toDashboardEvent: an otherwise-identical event with a Meteosat pass gets t
   const event = baseEvent({ detections: [det({}), det({ satellite: 'MTI1', instrument: 'FCI', confidence: '', frp: 0 })] });
   const dashboardEvent = toDashboardEvent(event, new Date('2026-09-03T02:00:00Z'));
   assert.equal(dashboardEvent.credits, 'NASA FIRMS·Open-Meteo·MTG Active Fire Monitoring — EUMETSAT');
+});
+
+// --- One-line plain-language summary (dashboard clarity pass) -------------
+
+test('summaryLine: single pass → "Anomalie thermique probable", village + wilaya, feminine caveat, station distance rounded to whole km', () => {
+  assert.equal(summaryLine(1, 'Jijel', 'Taher', 4.21), 'Anomalie thermique probable près de Taher (Jijel), non confirmée au sol — caserne la plus proche à 4 km.');
+});
+
+test('summaryLine: 2+ passes → "Signal thermique répété", masculine caveat', () => {
+  assert.equal(summaryLine(3, 'Béjaïa', 'Akbou', 12.6), 'Signal thermique répété près de Akbou (Béjaïa), non confirmé au sol — caserne la plus proche à 13 km.');
+});
+
+test('summaryLine: no village → wilaya only; no wilaya → village only; neither → still a whole sentence', () => {
+  assert.equal(summaryLine(1, 'Skikda', undefined, 2), 'Anomalie thermique probable dans la wilaya de Skikda, non confirmée au sol — caserne la plus proche à 2 km.');
+  assert.equal(summaryLine(1, null, 'Collo', 2), 'Anomalie thermique probable près de Collo, non confirmée au sol — caserne la plus proche à 2 km.');
+  assert.equal(summaryLine(1, null, undefined, undefined), 'Anomalie thermique probable, non confirmée au sol.');
+});
+
+test('summaryLine: under 1 km reads "<1 km"; missing station drops the clause; never says "feu détecté" or "confirmé au sol" without "non"', () => {
+  assert.equal(summaryLine(2, 'Alger', 'Bouzaréah', 0.4), 'Signal thermique répété près de Bouzaréah (Alger), non confirmé au sol — caserne la plus proche à <1 km.');
+  const noStation = summaryLine(2, 'Alger', 'Bouzaréah', undefined);
+  assert.equal(noStation, 'Signal thermique répété près de Bouzaréah (Alger), non confirmé au sol.');
+  for (const line of [noStation, summaryLine(1, 'Alger', 'Bouzaréah', 3)]) {
+    assert.doesNotMatch(line, /feu détecté/i);
+    assert.doesNotMatch(line, /(^|[^n] )confirmée? au sol/);
+  }
+});
+
+test('toDashboardEvent: natural event carries a summaryLine, an industrial one does not (its lead line already plays that role)', () => {
+  const natural = toDashboardEvent(baseEvent({ landUse: { context: 'natural' }, passCount: 1 }));
+  assert.ok(natural.summaryLine && natural.summaryLine.startsWith('Anomalie thermique probable'), natural.summaryLine);
+  const industrial = toDashboardEvent(baseEvent({ landUse: { context: 'industrial', siteName: 'X' } }));
+  assert.equal(industrial.summaryLine, undefined);
+  assert.ok(industrial.industrialLeadLine);
+});
+
+test('toDashboardEvent: nearest-station fields resolve from the real index and the phone is never invented', () => {
+  const ev = toDashboardEvent(baseEvent({}));
+  assert.ok(ev.nearestStationLine && /^Caserne la plus proche( : .+| \(sans nom sur OSM\)) — \d+\.\d km$/.test(ev.nearestStationLine), ev.nearestStationLine);
+  assert.ok(typeof ev.nearestStationDistanceKm === 'number' && ev.nearestStationDistanceKm >= 0);
+  assert.ok(ev.nearestStationPhone === null || typeof ev.nearestStationPhone === 'string');
+  assert.match(ev.summaryLine!, /caserne la plus proche à (<1|\d+) km\.$/);
 });
