@@ -20,7 +20,7 @@
 // no fabricated trajectories). Telegram's telegramText() is untouched and
 // unrelated to this.
 import {
-  LABELS, algiersTime, confidenceLabel, distinctPasses, eventWilaya, industrialLeadLine, magnitudeLabel, minutesSince, selectExposedVillages,
+  LABELS, algiersTime, confidenceLabel, creditsLine, distinctPasses, eventWilaya, evidenceLine, industrialLeadLine, magnitudeLabel, minutesSince, selectExposedVillages,
   type FireEvent, type LandUseContext,
 } from './fire-monitor';
 import { satelliteName } from './satellite-names';
@@ -79,7 +79,8 @@ export function toDashboardEvent(event: FireEvent, referenceTime: Date = new Dat
     sourceStatusLine: sourceStatusLine(event.passCount),
     magnitude: magnitudeLabel(event.maxFrp, event.maxPixelsInSinglePass, frpThresholdMw, isIndustrial),
     passes: distinctPasses(event).map(p => ({ ...p, satellite: satelliteName(p.satellite), acquiredAtAlgiers: algiersTime(p.acquiredAt) })),
-    evidenceShort: event.evidenceShort,
+    evidenceLine: evidenceLine(event),
+    credits: creditsLine(event),
     selection: selectExposedVillages(event, proximityKm).map(s => ({ ...s, village: withDisplayName(s.village) })),
     disclaimer: LABELS.disclaimer,
     landUseContext: event.landUse?.context,

@@ -39,9 +39,10 @@ export type DashboardEvent = {
   confidenceLabel: string; magnitude: string;
   sourceStatusLine: string;
   passes: PassInfo[];
-  evidenceShort: string[];
+  evidenceLine: string;
   selection: { village: VillageExposure; isProximity: boolean }[];
   disclaimer: string;
+  credits: string;
   landUseContext?: LandUseContext;
   landUseSiteName?: string;
   title: string;

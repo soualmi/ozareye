@@ -645,6 +645,28 @@ export function minutesSince(iso: string, referenceTime: Date) {
   return Math.round((referenceTime.getTime() - new Date(iso).getTime()) / 60000);
 }
 
+// Single breakdown of a raw minute count into days/hours/minutes — the one
+// place this maths happens. telegramText()'s formatElapsed() below and the
+// dashboard's formatAge()/formatDetectedAgo() (components/dashboard/format.ts)
+// both build their wording on top of this, so a raw count like "1285min" can't
+// leak into either surface, and the two never drift on where an hour or a day
+// tier begins.
+export function elapsedParts(minutes: number) {
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  const mins = minutes % 60;
+  return { days, hours, minutes: mins };
+}
+
+// Telegram's own wording on top of elapsedParts(): "Xmin" under an hour,
+// "Xh" / "Xh YYmin" under a day, "Xj" / "Xj XXh" beyond that.
+export function formatElapsed(minutes: number): string {
+  const { days, hours, minutes: mins } = elapsedParts(minutes);
+  if (days > 0) return hours === 0 ? `${days}j` : `${days}j ${hours}h`;
+  if (hours > 0) return mins === 0 ? `${hours}h` : `${hours}h ${mins}min`;
+  return `${minutes}min`;
+}
+
 // Exported: the dashboard renders the same Africa/Algiers times as the Telegram
 // message, via this same function — no separate reimplementation.
 export function algiersTime(iso: string) {
@@ -752,6 +774,52 @@ export function industrialLeadLine(siteName?: string): string {
   return `${site} — probablement une source de chaleur permanente (torchère, four, cheminée), pas un feu de végétation. À vérifier si le signal est inhabituel pour ce site.`;
 }
 
+// evidenceShort's compact internal tags, spelled out as short plain French
+// clauses — readable by someone with no context on this project, not just us.
+// 'zone+' (village-proximity boost) is intentionally dropped: the
+// nearby-village list already above already says that. Any tag not listed
+// here is silently skipped rather than ever leaking through as a bare code.
+function evidenceClauses(event: FireEvent): string[] {
+  const clauses: string[] = [];
+  for (const tag of event.evidenceShort) {
+    if (/^\d+pass$/.test(tag)) {
+      const n = parseInt(tag, 10);
+      clauses.push(n <= 1 ? 'vu par 1 passage satellite' : `vu par ${n} passages satellite`);
+    } else if (tag === 'conf+') {
+      clauses.push('confiance satellite élevée');
+    } else if (tag.startsWith('taille×')) {
+      clauses.push(`signal étendu sur ${tag.slice('taille×'.length)} pixels en un même passage`);
+    } else if (tag === 'recoupé') {
+      // ANY second pass/sensor, not necessarily Meteosat — 'meteosat+' below
+      // is the Meteosat-specific corroboration signal, kept distinct so this
+      // line never claims a Meteosat confirmation that didn't happen.
+      clauses.push('confirmé par un passage satellite supplémentaire');
+    } else if (tag === 'meteosat+') {
+      clauses.push('confirmé par Meteosat');
+    } else if (tag === 'anomalie') {
+      clauses.push('intensité nettement supérieure à la normale locale');
+    }
+  }
+  return clauses;
+}
+
+// The "Preuves" line's full content, in plain French — the one template both
+// telegramText() and the dashboard detail (lib/dashboard-view.ts) render, so
+// the two never hand-roll separate wordings for the same evidence.
+export function evidenceLine(event: FireEvent): string {
+  const windClause = event.windKph !== undefined && event.windDirectionFromDeg !== undefined
+    ? `vent ${event.windKph} km/h → ${cardinalFr(event.windDirectionFromDeg + 180)}` : '';
+  return [...evidenceClauses(event), windClause].filter(Boolean).join(' · ');
+}
+
+// The credits line — appends the Meteosat/EUMETSAT credit only when this
+// event actually carries a Meteosat pass; otherwise unchanged. Same template
+// for telegramText() and the dashboard detail, no separate logic path.
+export function creditsLine(event: FireEvent): string {
+  const hasMeteosatPass = event.detections.some(isMeteosatDetection);
+  return hasMeteosatPass ? 'NASA FIRMS·Open-Meteo·MTG Active Fire Monitoring — EUMETSAT' : 'NASA FIRMS·Open-Meteo';
+}
+
 export function telegramText(event: FireEvent, referenceTime = new Date(), proximityKm = DEFAULT_PROXIMITY_KM) {
   const icon = event.status === 'urgent' ? '🔴' : '🟠';
   const shown = selectExposedVillages(event, proximityKm);
@@ -765,8 +833,6 @@ export function telegramText(event: FireEvent, referenceTime = new Date(), proxi
     : LABELS.noVillage;
 
   const ageMin = minutesSince(event.lastAcquiredAt, referenceTime);
-  const windBit = event.windKph !== undefined && event.windDirectionFromDeg !== undefined
-    ? ` vent ${event.windKph} km/h → ${cardinalFr(event.windDirectionFromDeg + 180)}` : '';
   const wilaya = eventWilaya(event);
   const locationBit = wilaya ? ` · ${wilaya}` : '';
   // Leads the message, right after the title — a known industrial/energy
@@ -786,9 +852,7 @@ export function telegramText(event: FireEvent, referenceTime = new Date(), proxi
   const geoTrackedBit = event.geoTracked ? `🛰 Suivi Meteosat actif (toutes les ${METEOSAT_CADENCE_MIN} min)\n\n` : '';
 
   const lastIsMeteosat = isMeteosatDetection(event.detections[event.detections.length - 1]);
-  const frpBit = lastIsMeteosat ? '' : ` FRP${event.maxFrp.toFixed(1)}MW`;
-  const hasMeteosatPass = event.detections.some(isMeteosatDetection);
-  const attribution = hasMeteosatPass ? 'NASA FIRMS·Open-Meteo·MTG Active Fire Monitoring — EUMETSAT' : 'NASA FIRMS·Open-Meteo';
+  const frpBit = lastIsMeteosat ? '' : ` · puissance détectée : ${event.maxFrp.toFixed(1)} MW`;
 
-  return `${icon} ${LABELS.headline} — À VÉRIFIER\n\n${meteosatOnlyBit}${geoTrackedBit}${industrialBit}${villageLines}\n\n📍${event.latitude.toFixed(4)},${event.longitude.toFixed(4)}${locationBit} ${algiersTime(event.lastAcquiredAt)}Alger(${ageMin}min) ${event.detections[event.detections.length - 1].instrument}${frpBit}\nPreuves: ${event.evidenceShort.join('·')}${windBit}\n\n⚠️${LABELS.disclaimer}\n${attribution}`;
+  return `${icon} ${LABELS.headline} — À VÉRIFIER\n\n${meteosatOnlyBit}${geoTrackedBit}${industrialBit}${villageLines}\n\n📍${event.latitude.toFixed(4)},${event.longitude.toFixed(4)}${locationBit} ${algiersTime(event.lastAcquiredAt)} (Alger, il y a ${formatElapsed(ageMin)}) · ${event.detections[event.detections.length - 1].instrument}${frpBit}\nPreuves : ${evidenceLine(event)}\n\n⚠️${LABELS.disclaimer}\n${creditsLine(event)}`;
 }

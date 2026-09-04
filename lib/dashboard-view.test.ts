@@ -101,3 +101,16 @@ test('toDashboardEvent: an event with no land-use info at all reads exactly like
   assert.equal(dashboardEvent.title, 'Anomalie thermique — probablement un feu');
   assert.equal(dashboardEvent.industrialLeadLine, undefined);
 });
+
+test('toDashboardEvent: evidenceLine and credits are the same rendering fire-monitor.ts builds for Telegram', () => {
+  const event = baseEvent({});
+  const dashboardEvent = toDashboardEvent(event, new Date('2026-09-03T02:00:00Z'));
+  assert.equal(dashboardEvent.evidenceLine, 'signal étendu sur 3 pixels en un même passage · confirmé par un passage satellite supplémentaire');
+  assert.equal(dashboardEvent.credits, 'NASA FIRMS·Open-Meteo', 'no Meteosat pass on this event — credits line is unchanged');
+});
+
+test('toDashboardEvent: an otherwise-identical event with a Meteosat pass gets the extra credit', () => {
+  const event = baseEvent({ detections: [det({}), det({ satellite: 'MTI1', instrument: 'FCI', confidence: '', frp: 0 })] });
+  const dashboardEvent = toDashboardEvent(event, new Date('2026-09-03T02:00:00Z'));
+  assert.equal(dashboardEvent.credits, 'NASA FIRMS·Open-Meteo·MTG Active Fire Monitoring — EUMETSAT');
+});

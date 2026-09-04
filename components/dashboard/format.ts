@@ -14,10 +14,13 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+import { elapsedParts } from '@/lib/fire-monitor';
+
 export function formatAge(minutes: number): string {
-  if (minutes < 60) return `${minutes} min`;
-  const h = Math.floor(minutes / 60), m = minutes % 60;
-  return m === 0 ? `${h} h` : `${h} h ${m}`;
+  const { days, hours, minutes: m } = elapsedParts(minutes);
+  if (days > 0) return hours === 0 ? `${days} j` : `${days} j ${hours} h`;
+  if (hours > 0) return m === 0 ? `${hours} h` : `${hours} h ${m}`;
+  return `${minutes} min`;
 }
 
 // A detection outside every wilaya polygon isn't a data error — it's a real
@@ -30,7 +33,8 @@ export function wilayaLabel(wilaya: string | null | undefined): string {
 // "il y a 2h 15min" — spelled out for the per-event freshness line, kept
 // separate from formatAge's compact "2 h 15" used in dense contexts.
 export function formatDetectedAgo(minutes: number): string {
-  if (minutes < 60) return `${minutes}min`;
-  const h = Math.floor(minutes / 60), m = minutes % 60;
-  return m === 0 ? `${h}h` : `${h}h ${m}min`;
+  const { days, hours, minutes: m } = elapsedParts(minutes);
+  if (days > 0) return hours === 0 ? `${days}j` : `${days}j ${hours}h`;
+  if (hours > 0) return m === 0 ? `${hours}h` : `${hours}h ${m}min`;
+  return `${minutes}min`;
 }

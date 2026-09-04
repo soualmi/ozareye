@@ -150,6 +150,7 @@ export default function EventDetail({ event, onBack }: { event: DashboardEvent; 
             {event.humidity !== undefined && <li>Humidité relative : {event.humidity}%</li>}
             <li>Coordonnées : {event.latitude.toFixed(5)}, {event.longitude.toFixed(5)}</li>
             <li>Wilaya : {wilayaLabel(event.wilaya)}</li>
+            {event.evidenceLine && <li>Preuves : {event.evidenceLine}</li>}
           </ul>
           <p className="text-[#8da79d]">
             VIIRS (Visible Infrared Imaging Radiometer Suite) est un capteur en orbite polaire, résolution au sol d&apos;environ 375m,
@@ -160,7 +161,7 @@ export default function EventDetail({ event, onBack }: { event: DashboardEvent; 
 
       {/* 6. Disclaimer + credit */}
       <p className="mb-1 text-xs text-[#8da79d]">⚠️ {event.disclaimer}</p>
-      <p className="text-[10px] text-[#5f7a70]">NASA FIRMS · Open-Meteo</p>
+      <p className="text-[10px] text-[#5f7a70]">{event.credits}</p>
     </div>
   );
 }
