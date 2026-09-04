@@ -27,6 +27,7 @@ const ROWS: { swatch: React.ReactNode; label: string }[] = [
   { swatch: <span className="inline-block h-2.5 w-2.5 rounded-full border-2 border-[#062017]" style={{ background: '#4fa3ff' }} />, label: 'point bleu = village sous le vent' },
   { swatch: <span className="text-base leading-none text-[#4fa3ff]">↑</span>, label: 'flèche = direction vers laquelle souffle le vent' },
   { swatch: <span className="inline-block h-0 w-4 border-t-2 border-dashed" style={{ borderColor: '#7aa697' }} />, label: 'trait pointillé = lien feu → village exposé' },
+  { swatch: <span className="inline-block h-3 w-3 rounded-full border-2 border-dashed" style={{ borderColor: '#8da79d' }} />, label: 'rond pointillé = position approximative Meteosat (±3km), non confirmé par satellite polaire' },
 ];
 
 export default function Legend() {
@@ -39,14 +40,19 @@ export default function Legend() {
         <span className="text-[#8da79d]">{open ? '▾' : '▸'}</span>
       </button>
       {open && (
-        <ul className="space-y-1.5 border-t border-white/10 px-3 py-2">
-          {ROWS.map((row, i) => (
-            <li key={i} className="flex items-center gap-2">
-              <span className="w-4 shrink-0">{row.swatch}</span>
-              {row.label}
-            </li>
-          ))}
-        </ul>
+        <>
+          <ul className="space-y-1.5 border-t border-white/10 px-3 py-2">
+            {ROWS.map((row, i) => (
+              <li key={i} className="flex items-center gap-2">
+                <span className="w-4 shrink-0">{row.swatch}</span>
+                {row.label}
+              </li>
+            ))}
+          </ul>
+          <div className="border-t border-white/10 px-3 py-2 text-[11px] text-[#8da79d]">
+            Sources : NASA FIRMS · MTG Active Fire Monitoring — EUMETSAT · Open-Meteo
+          </div>
+        </>
       )}
     </div>
   );

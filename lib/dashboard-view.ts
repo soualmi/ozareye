@@ -86,5 +86,8 @@ export function toDashboardEvent(event: FireEvent, referenceTime: Date = new Dat
     landUseSiteName: event.landUse?.siteName,
     title: eventTitle(event.landUse?.context),
     industrialLeadLine: isIndustrial ? industrialLeadLine(event.landUse!.siteName) : undefined,
+    positionSource: event.positionSource ?? 'viirs',
+    positionUncertaintyKm: event.positionUncertaintyKm,
+    geoTracked: event.geoTracked ?? false,
   };
 }

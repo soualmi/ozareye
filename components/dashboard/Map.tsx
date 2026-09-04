@@ -19,7 +19,7 @@
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
 import { useEffect, useRef, useState } from 'react';
-import { MapContainer, Marker, Polyline, Popup, TileLayer, Tooltip, useMap, useMapEvents } from 'react-leaflet';
+import { Circle, MapContainer, Marker, Polyline, Popup, TileLayer, Tooltip, useMap, useMapEvents } from 'react-leaflet';
 import { blowsTowardDeg } from '@/lib/wind';
 import { displayName } from '@/lib/place-name';
 import { formatAge, wilayaLabel } from './format';
@@ -36,13 +36,19 @@ function escapeHtml(s: string) {
   return s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 }
 
-function fireIcon(status: DashboardEvent['status'], frp: number, selected: boolean, label: string) {
+// positionSource 'meteosat' (rule c/e, locked): a hollow/dashed circle
+// instead of a filled one — visually distinct at a glance from a
+// VIIRS-anchored marker, since this position carries a real ~3km
+// uncertainty and has never been corroborated by a polar overpass. The
+// faint uncertainty ring itself is drawn separately, see DashboardMap below.
+function fireIcon(status: DashboardEvent['status'], frp: number, selected: boolean, label: string, positionSource: DashboardEvent['positionSource']) {
   const color = status === 'urgent' ? '#ff5b32' : status === 'corroborated' ? '#f5b942' : '#63dda0';
   const size = Math.min(34, Math.max(14, 10 + Math.sqrt(frp) * 2));
   const ring = selected ? `box-shadow:0 0 0 3px #fff, 0 0 0 5px ${color};` : '';
   const safe = escapeHtml(label);
+  const fill = positionSource === 'meteosat' ? `background:transparent;border:3px dashed ${color};` : `background:${color};`;
   return L.divIcon({
-    className: '', html: `<div role="img" aria-label="${safe}" title="${safe}" style="width:${size}px;height:${size}px;border-radius:50%;background:${color};opacity:.9;${ring}"></div>`,
+    className: '', html: `<div role="img" aria-label="${safe}" title="${safe}" style="width:${size}px;height:${size}px;border-radius:50%;${fill}opacity:.9;${ring}"></div>`,
     iconSize: [size, size], iconAnchor: [size / 2, size / 2],
   });
 }
@@ -138,6 +144,10 @@ function FirePopup({ event, onDetail }: { event: DashboardEvent; onDetail: (id: 
       {/* Industrial context leads, right under the title — same hierarchy
           fix as the detail panel, not a note trailing at the bottom. */}
       {event.industrialLeadLine && <div style={{ marginTop: 4, color: '#f5b942' }}>🏭 {event.industrialLeadLine}</div>}
+      {event.positionSource === 'meteosat' && (
+        <div style={{ marginTop: 4, color: '#8da79d' }}>🛰 Position approximative Meteosat (±{event.positionUncertaintyKm ?? 3}km), non confirmé par satellite polaire</div>
+      )}
+      {event.geoTracked && <div style={{ marginTop: 4, color: '#4fa3ff' }}>🛰 Suivi Meteosat actif</div>}
       <div>{[nearest, wilayaLabel(event.wilaya)].filter(Boolean).join(' · ')}</div>
       <div>{capitalize(magnitudeShort)}</div>
       <div>Dernier passage satellite : {event.detectedAtAlgiers} (Alger)</div>
@@ -179,13 +189,24 @@ export default function DashboardMap({ events, selectedId, onSelect, onDetail }:
         <Marker
           key={ev.id}
           position={[ev.latitude, ev.longitude]}
-          icon={fireIcon(ev.status, ev.maxFrp, ev.id === selectedId, markerLabel(ev))}
+          icon={fireIcon(ev.status, ev.maxFrp, ev.id === selectedId, markerLabel(ev), ev.positionSource)}
           eventHandlers={{ click: () => onSelect(ev.id) }}
           alt={markerLabel(ev)}
         >
-          <Tooltip direction="top">{wilayaLabel(ev.wilaya)} · FRP {ev.maxFrp.toFixed(1)}MW</Tooltip>
+          <Tooltip direction="top">{wilayaLabel(ev.wilaya)} · FRP {ev.maxFrp.toFixed(1)}MW{ev.geoTracked ? ' · suivi Meteosat' : ''}</Tooltip>
           <Popup><FirePopup event={ev} onDetail={onDetail} /></Popup>
         </Marker>
+      ))}
+      {/* Faint ±3km uncertainty ring for a Meteosat-only position — the
+          hollow marker above already signals "different kind of marker";
+          this makes the actual pixel uncertainty visible at a glance. */}
+      {events.filter(ev => ev.positionSource === 'meteosat').map(ev => (
+        <Circle
+          key={`unc-${ev.id}`}
+          center={[ev.latitude, ev.longitude]}
+          radius={(ev.positionUncertaintyKm ?? 3) * 1000}
+          pathOptions={{ color: '#8da79d', weight: 1, fillColor: '#8da79d', fillOpacity: 0.06, dashArray: '3 5' }}
+        />
       ))}
 
       {selectedEvent && selectedEvent.selection.map(({ village, isProximity }) => (

@@ -15,9 +15,10 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import {
-  ALERT_SCORE_THRESHOLD, clusterDetections, enrichWeather, eventWilaya, fetchDetections, gridCell, lowerStatus, telegramText,
-  DEFAULT_PERSISTENT_SOURCE_WINDOW_DAYS, FIRMS_SOURCES, type Detection, type FireEvent,
+  ALERT_SCORE_THRESHOLD, clusterDetections, effectiveProximityKm, enrichWeather, eventWilaya, fetchDetections, gridCell, hasNearbyVillage, lowerStatus, telegramText,
+  DEFAULT_PERSISTENT_SOURCE_WINDOW_DAYS, FIRMS_SOURCES, MTG_SOURCE, type Detection, type FireEvent,
 } from '@/lib/fire-monitor';
+import { fetchMeteosatSlots } from '@/lib/meteosat';
 import { lookupLandUse } from '@/lib/landuse';
 import { activeEvents, distinctDayCount, getConfig, initDb, isFirstRun, pruneHotspotHistory, recordDetectionDay, saveSignal, type EngineConfig } from '@/lib/database';
 import { bboxToString } from '@/scripts/build-villages';
@@ -34,7 +35,19 @@ preferIpv4();
 const ESCALATION_SCORE_DELTA = 15;
 const STATUS_RANK: Record<FireEvent['status'], number> = { observation: 0, corroborated: 1, urgent: 2 };
 
-function shouldAlert(event: FireEvent) {
+// Meteosat fusion, rule (e), locked: a Meteosat-only event alerts ONLY once
+// it's cleared the 2-pass/~30min gate (already enforced by scoreEvent()
+// capping status at 'corroborated' only when that gate is met — 'observation'
+// otherwise) AND a village sits within the widened (±3km) proximity radius.
+// Status can never exceed 'corroborated' for these events, so there is no
+// "escalation" to re-alert on — this fires exactly once, when the gate is
+// first met, same one-shot shape as a VIIRS event's very first alert.
+function shouldAlert(event: FireEvent, proximityKm: number) {
+  if (event.positionSource === 'meteosat') {
+    if (event.status !== 'corroborated') return false;
+    if (!hasNearbyVillage(event, effectiveProximityKm(event, proximityKm))) return false;
+    return event.notifiedStatus !== 'corroborated';
+  }
   if (event.score < ALERT_SCORE_THRESHOLD) return false;
   if (!event.notifiedAt) return true;
   const scoreGrew = event.score - (event.notifiedScore ?? 0) >= ESCALATION_SCORE_DELTA;
@@ -127,17 +140,28 @@ async function runMonitor(request: Request): Promise<Response> {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.log(`monitor run CRASHED before sources were polled: ${message}`);
-    await Promise.all(FIRMS_SOURCES.map(source => recordSourceOutcome(source, { success: false, error: `run crashed: ${message}`.slice(0, 200) })));
+    await Promise.all([...FIRMS_SOURCES, MTG_SOURCE].map(source => recordSourceOutcome(source, { success: false, error: `run crashed: ${message}`.slice(0, 200) })));
     return Response.json({ error: 'Erreur interne' }, { status: 500 });
   }
 
   const sourceResults = await fetchDetections(mapKey, { box: bboxToString(config.bbox) });
   await Promise.all(sourceResults.map(r => recordSourceOutcome(r.source, r.rows === null ? { success: false, error: r.error ?? 'erreur inconnue' } : { success: true })));
   const rawDetections = sourceResults.flatMap(r => r.rows ?? []);
-  const { kept: detections, suppressed } = await suppressPersistentSources(rawDetections, config.persistentSourceDays);
+
+  // Meteosat: independent of, and sequential after, the FIRMS sources —
+  // never lets a slow/down EUMETSAT Data Store hold up VIIRS, and its own
+  // failure is watchdog-tracked exactly like a FIRMS source's (see
+  // lib/meteosat.ts's fail-soft contract).
+  const meteosatResult = await fetchMeteosatSlots(config.bbox);
+  await recordSourceOutcome(MTG_SOURCE, meteosatResult.ok ? { success: true } : { success: false, error: meteosatResult.error ?? 'erreur inconnue' });
+
+  const { kept: detections, suppressed } = await suppressPersistentSources([...rawDetections, ...meteosatResult.detections], config.persistentSourceDays);
   const events = clusterDetections(detections, await activeEvents(), config.frpThresholdMw);
 
-  const sourcesLog = sourceResults.map(r => ({ source: r.source, rows: r.rows === null ? 'FAILED' : r.rows.length }));
+  const sourcesLog = [
+    ...sourceResults.map(r => ({ source: r.source, rows: r.rows === null ? 'FAILED' : r.rows.length })),
+    { source: MTG_SOURCE, rows: meteosatResult.ok ? meteosatResult.detections.length : 'FAILED' },
+  ];
 
   if (firstRun) {
     for (const event of events) {
@@ -152,9 +176,15 @@ async function runMonitor(request: Request): Promise<Response> {
   let sent = 0;
   const alertsPerWilaya: Record<string, number> = {};
   for (const raw of events) {
-    let event = raw.score >= 55 ? await enrichWeather(raw) : raw;
+    // A Meteosat-only event never carries real FRP/confidence, so its raw
+    // score alone rarely crosses 55 — but rule (e)'s gate needs real
+    // wind/village data to render a coherent message once it clears
+    // 'corroborated', same as any VIIRS event that would enrich anyway.
+    const meteosatEligible = raw.positionSource === 'meteosat' && raw.status === 'corroborated';
+    let event = (raw.score >= 55 || meteosatEligible) ? await enrichWeather(raw) : raw;
     event = await applyLandUse(event);
-    if (shouldAlert(event)) {
+    const proximityKm = effectiveProximityKm(event, config.proximityKm);
+    if (shouldAlert(event, config.proximityKm)) {
       const wilaya = eventWilaya(event);
       const destination = chatIdForWilaya(wilaya, chatId);
       // Previously unguarded: a network error or hung request here would
@@ -164,7 +194,7 @@ async function runMonitor(request: Request): Promise<Response> {
       // on the next poll instead of getting silently marked as sent), loop
       // continues.
       try {
-        const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id: destination, text: telegramText(event, undefined, config.proximityKm), disable_web_page_preview: true }), signal: AbortSignal.timeout(10_000) });
+        const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id: destination, text: telegramText(event, undefined, proximityKm), disable_web_page_preview: true }), signal: AbortSignal.timeout(10_000) });
         if (response.ok) {
           event.notifiedAt = new Date().toISOString(); event.notifiedScore = event.score; event.notifiedStatus = event.status; sent++;
           const key = wilaya ?? 'inconnue';

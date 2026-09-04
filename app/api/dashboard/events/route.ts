@@ -17,8 +17,14 @@
 import { activeEvents, getConfig, getSourceHealth } from '@/lib/database';
 import { isAuthenticated } from '@/lib/dashboard-auth';
 import { toDashboardEvent } from '@/lib/dashboard-view';
-import { FIRMS_SOURCES } from '@/lib/fire-monitor';
+import { FIRMS_SOURCES, MTG_SOURCE } from '@/lib/fire-monitor';
 import { satelliteName } from '@/lib/satellite-names';
+
+// The 3 FIRMS/VIIRS sources plus Meteosat — kept as a separate concat rather
+// than editing FIRMS_SOURCES itself, since that constant is also reused by
+// app/api/monitor/route.ts's crash-path (which lists MTG_SOURCE alongside it
+// there too, but the two lists serve different call sites, not one shared one).
+const ALL_SOURCES = [...FIRMS_SOURCES, MTG_SOURCE];
 
 // Read-only: pulls stored events from the DB only. Never calls FIRMS, never
 // sends Telegram — that's /api/monitor's job, untouched by this route.
@@ -30,7 +36,7 @@ export async function GET(request: Request) {
   const [events, config, health] = await Promise.all([
     activeEvents(24),
     getConfig(),
-    Promise.all(FIRMS_SOURCES.map(async source => ({ source, name: satelliteName(source), row: await getSourceHealth(source) }))),
+    Promise.all(ALL_SOURCES.map(async source => ({ source, name: satelliteName(source), row: await getSourceHealth(source) }))),
   ]);
   const mapped = events.map(e => toDashboardEvent(e, undefined, config.frpThresholdMw, config.proximityKm)).filter(e => !wilaya || wilaya === 'all' || e.wilaya === wilaya);
 
