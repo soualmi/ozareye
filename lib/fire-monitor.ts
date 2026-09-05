@@ -86,6 +86,14 @@ export type FireEvent = {
   // vegetation survey — see lib/forestcover.ts's own module comment.
   inForest?: boolean;
   notifiedAt?: string; notifiedScore?: number; notifiedStatus?: FireEvent['status'];
+  // Tier 1 early-warning notice (opt-in, ENABLE_EARLY_SIGNAL_NOTICE) — set
+  // once the lightweight "1 seul passage, non confirmé" notice has been
+  // sent for this event's very first detection, so a later poll never
+  // repeats it while the event is still uncorroborated. Entirely separate
+  // from notifiedAt/notifiedScore/notifiedStatus, which track the REAL
+  // alert — an event can have one, the other, or (rarely) both if it later
+  // corroborates after already getting an early notice.
+  earlyNoticeAt?: string;
   // Meteosat/SLSTR fusion (see clusterDetections/scoreEvent below) —
   // recomputed from event.detections every poll, exactly like
   // maxFrp/passCount above, never trusted as separately-mutated state.
@@ -206,7 +214,23 @@ const SECONDARY_ALERT_MIN_DETECTIONS = 2;
 // must persist across at least 3 real revisits before it can ever alert,
 // not just repeat once. Applied to Meteosat-only and SLSTR-only events
 // alike — see meetsSecondaryAlertGate below.
+//
+// UPDATE (Tier 2 fast-track, added after the Sétif/Boutaleb fire took ~3h
+// to alert): the rule above was written to reject "several circles from
+// the same overpass", not to reject two genuinely back-to-back overpasses
+// — but a flat ">=30min span" gate accidentally rejects the single
+// strongest case there is too: two CONSECUTIVE ~10min-cadence images both
+// agreeing, the earliest possible moment two independent satellite
+// passes corroborate each other. See meteosatConsecutivePasses() and its
+// own use in scoreEvent() below — a deliberate, logged, ADDITIONAL path
+// alongside this one, not a relaxation of it: everything this comment
+// describes is unchanged, still exactly this strict for every case that
+// doesn't specifically double-consecutive.
 const SECONDARY_ALERT_MIN_SPAN_MIN = 30;
+// Tier 2 fast-track: nominal 10min cadence plus a little scheduling/
+// processing slack — real consecutive products have landed anywhere from
+// ~9 to ~11 minutes apart in practice, not exactly 10.0.
+const METEOSAT_CONSECUTIVE_MAX_GAP_MIN = METEOSAT_CADENCE_MIN + 5;
 
 // "Détection précoce" (early detection) — three small, additive score
 // boosts, NOT a replacement for clustering or the ALERT_SCORE_THRESHOLD
@@ -531,6 +555,26 @@ function secondaryDetectionSpanMinutes(dets: Detection[]): number {
 // instruments (Meteosat AND SLSTR both), a strictly stronger claim
 // (independent-sensor corroboration) than repeat passes from one sensor, so
 // it clears the gate without needing the pass-count/span check too.
+// Tier 2 fast-track, locked separately from rule (e) above: TWO Meteosat
+// passes whose timestamps are within METEOSAT_CONSECUTIVE_MAX_GAP_MIN of
+// each other (i.e. genuinely back-to-back ~10min cadence cycles, not "2
+// passes eventually" spread over half an hour) are strong enough temporal
+// evidence on their own — the very next overpass after the first one ALSO
+// saw the same spot. Scoped to Meteosat only (SLSTR has no comparable
+// ~10min cadence to be "consecutive" against) and to whether the
+// corroboration wait can be skipped — never to 'urgent' (rule e's cap on
+// a secondary-only event's status is untouched) and never to where the
+// pin sits (positionSource/positionUncertaintyKm are computed exactly as
+// before, unaffected by which path got the event to 'corroborated').
+function meteosatConsecutivePasses(meteosatDets: Detection[]): { found: boolean; gapMin?: number } {
+  const times = [...new Set(meteosatDets.map(d => d.acquiredAt))].map(t => new Date(t).getTime()).sort((a, b) => a - b);
+  for (let i = 1; i < times.length; i++) {
+    const gapMin = (times[i] - times[i - 1]) / 60_000;
+    if (gapMin <= METEOSAT_CONSECUTIVE_MAX_GAP_MIN) return { found: true, gapMin: Math.round(gapMin) };
+  }
+  return { found: false };
+}
+
 function meetsSecondaryAlertGate(secondaryDets: Detection[]): boolean {
   const distinctInstruments = new Set(secondaryDets.map(d => d.instrument)).size;
   if (distinctInstruments >= 2) return true;
@@ -649,7 +693,18 @@ function scoreEvent(event: FireEvent, frpThresholdMw = DEFAULT_FRP_THRESHOLD_MW)
   score = Math.min(score, 100);
 
   let status: FireEvent['status'] = score >= 85 ? 'urgent' : score >= 65 ? 'corroborated' : 'observation';
-  if (!hasViirs) status = meetsSecondaryAlertGate(secondaryDets) ? 'corroborated' : 'observation';
+  if (!hasViirs) {
+    const secondaryGate = meetsSecondaryAlertGate(secondaryDets);
+    // Tier 2 fast-track: only checked (and only matters) when the normal
+    // gate hasn't already been cleared — logged specifically when it's
+    // this path, not the existing one, doing the work, so the fast-track's
+    // own hit rate is measurable separately from rule (e)'s normal path.
+    const fastTrack = !secondaryGate ? meteosatConsecutivePasses(meteosatDets) : { found: false };
+    status = (secondaryGate || fastTrack.found) ? 'corroborated' : 'observation';
+    if (fastTrack.found) {
+      console.log(`event ${event.id}: fast-tracked to 'corroborated' via 2 consecutive Meteosat passes (${fastTrack.gapMin}min apart, <= ${METEOSAT_CONSECUTIVE_MAX_GAP_MIN}min threshold) — bypassing the normal ${SECONDARY_ALERT_MIN_SPAN_MIN}min-span gate`);
+    }
+  }
 
   // Real per-detection radius (Meteosat's CAP-reported value, ~1.1-1.9km
   // observed live; SLSTR's fixed ~1km fallback) wins over the flat fallback
@@ -1040,4 +1095,37 @@ export function telegramText(event: FireEvent, referenceTime = new Date(), proxi
   const stationBit = stationLine ? `\n🚒 ${stationLine}` : '';
 
   return `${icon} ${LABELS.headline} — À VÉRIFIER\n\n${meteosatOnlyBit}${slstrOnlyBit}${geoTrackedBit}${industrialBit}${villageLines}\n\n📍${event.latitude.toFixed(4)},${event.longitude.toFixed(4)}${locationBit} ${algiersTime(event.lastAcquiredAt)} (Alger, il y a ${formatElapsed(ageMin)}) · ${lastDetection.instrument}${frpBit}\nPreuves : ${evidenceLine(event)}${stationBit}\n\n⚠️${LABELS.disclaimer}\n${creditsLine(event)}`;
+}
+
+// Tier 1 early-warning notice (opt-in, ENABLE_EARLY_SIGNAL_NOTICE) — a
+// deliberately bare, low-key message for a brand-new event's very FIRST
+// detection, sent before any corroboration gate (rule e/(c), Tier 2's
+// fast-track, or the plain score>=70 threshold) has had a chance to fire.
+// Visually and textually distinct from telegramText() on purpose — no
+// village list, no "Preuves" line, no "vérifier terrain" disclaimer — a
+// single uncorroborated pixel supports NONE of those claims yet, only "a
+// satellite saw one warm spot here, once". Position + wilaya only, same
+// bare-minimum honesty as everything else in this file: nothing invented,
+// nothing implied that the evidence doesn't support.
+export function earlySignalText(event: FireEvent): string {
+  const wilaya = eventWilaya(event);
+  const locationBit = wilaya ? ` · ${wilaya}` : '';
+  return `🟡 Signal thermique isolé détecté — 1 seul passage satellite, non confirmé, à surveiller.\n\n📍${event.latitude.toFixed(4)},${event.longitude.toFixed(4)}${locationBit}`;
+}
+
+// Opt-in (off unless ENABLE_EARLY_SIGNAL_NOTICE is set to exactly 'true'),
+// so a fresh deployment or one where Sid hasn't deliberately judged the
+// noise level yet stays byte-for-byte on today's behaviour. Fires at most
+// once per event: exactly on the poll where it's still a single,
+// uncorroborated detection (passCount === 1) AND it hasn't already gotten
+// this notice AND it isn't ALSO getting the real alert this same poll
+// (`alerting`, the caller's own shouldAlert() result — that case is
+// already better served by the real alert, no point sending both). Once a
+// second pass joins, passCount stops being 1 and this never fires again
+// for that event.
+export function shouldSendEarlyNotice(event: FireEvent, alerting: boolean): boolean {
+  if (process.env.ENABLE_EARLY_SIGNAL_NOTICE !== 'true') return false;
+  if (alerting) return false;
+  if (event.earlyNoticeAt || event.notifiedAt) return false;
+  return event.passCount === 1;
 }

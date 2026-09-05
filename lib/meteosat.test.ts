@@ -101,7 +101,7 @@ test('[SYNTHETIC FIXTURE] rule d: a later VIIRS pass re-anchors a Meteosat-only 
   assert.ok(reanchored.score >= 55, 're-anchoring must push the score past route.ts\'s enrichWeather threshold, so villages/wind get recomputed against the NEW position on this same run');
 });
 
-test('rule e: a Meteosat-only event needs 2 distinct passes >=30min apart to reach corroborated', () => {
+test('rule e: a Meteosat-only event needs 2 distinct passes >=30min apart (or Tier 2\'s 2-consecutive-~10min fast-track) to reach corroborated', () => {
   const [afterOne] = clusterDetections([meteosatDet({ acquiredAt: '2026-01-01T00:00:00Z' })], []);
   assert.equal(afterOne.status, 'observation', 'a single pass never qualifies');
 
@@ -110,13 +110,23 @@ test('rule e: a Meteosat-only event needs 2 distinct passes >=30min apart to rea
   const [afterSameFrame] = clusterDetections([meteosatDet({ latitude: 36.5005, longitude: 5.5005, acquiredAt: '2026-01-01T00:00:00Z' })], [afterOne]);
   assert.equal(afterSameFrame.status, 'observation', 'two circles from the same 10-minute frame count as one pass, not two');
 
-  // A second pass only 10 minutes later (the real measured cadence) is too soon.
-  const [afterTooSoon] = clusterDetections([meteosatDet({ acquiredAt: '2026-01-01T00:10:00Z' })], [afterSameFrame]);
-  assert.equal(afterTooSoon.status, 'observation', 'a pass only 10 minutes later does not meet the ~30min gate');
+  // A second pass 10 minutes later (the real measured cadence) IS a genuine
+  // second pass, at exactly the "2 consecutive ~10min cadence cycles" shape
+  // Tier 2's fast-track exists for (added after the Sétif/Boutaleb fire's
+  // ~3h alert delay) — see lib/meteosat-fasttrack.test.ts for the dedicated
+  // coverage; this specific case used to assert 'observation' before Tier 2.
+  const [afterConsecutive] = clusterDetections([meteosatDet({ acquiredAt: '2026-01-01T00:10:00Z' })], [afterSameFrame]);
+  assert.equal(afterConsecutive.status, 'corroborated', 'Tier 2 fast-track: 2 consecutive ~10min passes corroborate immediately, no 30min wait needed');
+});
 
-  // A pass >=30 minutes after the first does.
+test('rule e: a gap that is neither consecutive (<=15min) nor >=30min still falls through both gates', () => {
+  const [afterOne] = clusterDetections([meteosatDet({ acquiredAt: '2026-01-01T00:00:00Z' })], []);
+  const [afterTooSoon] = clusterDetections([meteosatDet({ acquiredAt: '2026-01-01T00:20:00Z' })], [afterOne]);
+  assert.equal(afterTooSoon.status, 'observation', 'a 20min gap is too far for the fast-track (>15min) and too soon for the normal gate (<30min)');
+
+  // A pass >=30 minutes after the first still clears the normal (non-fast-track) gate.
   const [afterFarEnough] = clusterDetections([meteosatDet({ acquiredAt: '2026-01-01T00:30:00Z' })], [afterTooSoon]);
-  assert.equal(afterFarEnough.status, 'corroborated', 'two passes >=30min apart clears the gate');
+  assert.equal(afterFarEnough.status, 'corroborated', 'two passes >=30min apart clears the gate, same as before Tier 2');
 });
 
 test('rule e: status never exceeds corroborated for a Meteosat-only event, however many passes', () => {

@@ -15,7 +15,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import {
-  ALERT_SCORE_THRESHOLD, clusterDetections, effectiveProximityKm, enrichWeather, eventWilaya, fetchDetections, hasNearbyVillage, telegramText,
+  ALERT_SCORE_THRESHOLD, clusterDetections, earlySignalText, effectiveProximityKm, enrichWeather, eventWilaya, fetchDetections, hasNearbyVillage, shouldSendEarlyNotice, telegramText,
   FIRMS_SOURCES, MTG_SOURCE, SLSTR_SOURCE, type FireEvent,
 } from '@/lib/fire-monitor';
 import { fetchMeteosatSlots } from '@/lib/meteosat';
@@ -157,7 +157,8 @@ async function runMonitor(request: Request): Promise<Response> {
     event = await applyLandUse(event);
     event = applyForestCover(event);
     const proximityKm = effectiveProximityKm(event, config.proximityKm);
-    if (shouldAlert(event, config.proximityKm)) {
+    const alerting = shouldAlert(event, config.proximityKm);
+    if (alerting) {
       const wilaya = eventWilaya(event);
       const destination = chatIdForWilaya(wilaya, chatId);
       // Previously unguarded: a network error or hung request here would
@@ -175,6 +176,19 @@ async function runMonitor(request: Request): Promise<Response> {
         }
       } catch (error) {
         console.log(`Telegram send FAILED for event ${event.id}: ${error instanceof Error ? error.message : error}`);
+      }
+    } else if (shouldSendEarlyNotice(event, alerting)) {
+      // Tier 1: a deliberately separate, lightweight send — same fail-soft
+      // shape as the real alert above (a failure here must never crash the
+      // run or mark the event as notified), but its own text, its own
+      // timestamp field, no village/wind data needed (none is computed for
+      // a raw score this low anyway).
+      const destination = chatIdForWilaya(eventWilaya(event), chatId);
+      try {
+        const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id: destination, text: earlySignalText(event), disable_web_page_preview: true }), signal: AbortSignal.timeout(10_000) });
+        if (response.ok) event.earlyNoticeAt = new Date().toISOString();
+      } catch (error) {
+        console.log(`Early-signal notice send FAILED for event ${event.id}: ${error instanceof Error ? error.message : error}`);
       }
     }
     await saveSignal(event);
