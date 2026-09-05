@@ -24,6 +24,7 @@ import {
   type Detection, type FireEvent,
 } from './fire-monitor';
 import { lookupLandUse } from './landuse';
+import { isInForest } from './forestcover';
 import { distinctDayCount, frpBaseline, pruneFrpHistory, pruneHotspotHistory, recordDetectionDay, recordFrpObservation } from './database';
 
 function windowCutoffDay(): string {
@@ -137,4 +138,12 @@ export async function applyLandUse(event: FireEvent): Promise<FireEvent> {
   const landUse = await lookupLandUse(event.latitude, event.longitude);
   if (landUse.context !== 'industrial') return { ...event, landUse };
   return { ...event, landUse, status: industrialStatus(event) };
+}
+
+// Real OSM forest cover (lib/forestcover.ts, a local-index lookup — see
+// there): a purely additive context flag, never touches status/score. A
+// local index lookup is sub-millisecond, same low cost as applyLandUse
+// above, so this runs unconditionally for every clustered event.
+export function applyForestCover(event: FireEvent): FireEvent {
+  return { ...event, inForest: isInForest(event.latitude, event.longitude) };
 }

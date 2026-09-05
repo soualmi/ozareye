@@ -57,3 +57,6 @@ tsconfig.tsbuildinfo
 
 # fire-station index build: resume checkpoint, not the shipped dataset
 /data/.firestation-index-progress.json
+
+# forest-cover index build: resume checkpoint, not the shipped dataset
+/data/.forest-index-progress.json

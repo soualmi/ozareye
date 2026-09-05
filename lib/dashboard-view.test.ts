@@ -159,7 +159,7 @@ test('toDashboardEvent: nearest-station fields resolve from the real index and t
 
 // --- Display filters (weak-signal + industrial + border, combinable) -------
 
-type F = { id: string; status: 'observation' | 'corroborated' | 'urgent'; landUseContext?: 'industrial' | 'natural' | 'unknown'; wilaya: string | null };
+type F = { id: string; status: 'observation' | 'corroborated' | 'urgent'; landUseContext?: 'industrial' | 'natural' | 'unknown'; wilaya: string | null; inForest?: boolean };
 const indUrgent: F = { id: 'ind-urgent', status: 'urgent', landUseContext: 'industrial', wilaya: 'Skikda' };
 const indCorrob: F = { id: 'ind-corrob', status: 'corroborated', landUseContext: 'industrial', wilaya: 'Jijel' };
 const indWeak: F = { id: 'ind-weak', status: 'observation', landUseContext: 'industrial', wilaya: 'Jijel' };
@@ -167,12 +167,13 @@ const natUrgent: F = { id: 'nat-urgent', status: 'urgent', landUseContext: 'natu
 const natWeak: F = { id: 'nat-weak', status: 'observation', landUseContext: 'natural', wilaya: 'Sétif' };
 const noCtxCorrob: F = { id: 'noctx-corrob', status: 'corroborated', wilaya: 'Béjaïa' };
 const atSea: F = { id: 'at-sea', status: 'corroborated', landUseContext: 'natural', wilaya: null };
+const forestUrgent: F = { id: 'forest-urgent', status: 'urgent', landUseContext: 'natural', wilaya: 'Jijel', inForest: true };
 const ALL = [indUrgent, indCorrob, indWeak, natUrgent, natWeak, noCtxCorrob, atSea];
 const ids = (list: F[]) => list.map(e => e.id);
 const f = (o: Partial<DisplayFilters>): DisplayFilters => ({ ...DEFAULT_DISPLAY_FILTERS, ...o });
 
 test('displayFilters: defaults hide weak signals AND industrial sites, keep border-crossers', () => {
-  assert.deepEqual(DEFAULT_DISPLAY_FILTERS, { showWeakSignals: false, showIndustrial: false, hideUnknownWilaya: false });
+  assert.deepEqual(DEFAULT_DISPLAY_FILTERS, { showWeakSignals: false, showIndustrial: false, hideUnknownWilaya: false, forestOnly: false });
   assert.deepEqual(ids(applyDisplayFilters(ALL, DEFAULT_DISPLAY_FILTERS)), ['nat-urgent', 'noctx-corrob', 'at-sea']);
 });
 
@@ -200,6 +201,15 @@ test('displayFilters: both opt-ins unchecked hides the UNION (weak ∪ industria
   assert.equal(isDisplayed(indWeak, f({ showWeakSignals: true, showIndustrial: false })), false);
   assert.equal(isDisplayed(indWeak, f({ showWeakSignals: false, showIndustrial: true })), false);
   assert.equal(isDisplayed(indWeak, f({ showWeakSignals: true, showIndustrial: true })), true);
+});
+
+test('displayFilters: forestOnly ISOLATES (opposite intent from the other boxes) — unticked shows everything, ticked hides everything without inForest === true', () => {
+  assert.equal(isDisplayed(natUrgent, f({ forestOnly: false })), true);
+  assert.equal(isDisplayed(natUrgent, f({ forestOnly: true })), false, 'no inForest flag at all must not count as forest');
+  assert.equal(isDisplayed(forestUrgent, f({ forestOnly: false })), true);
+  assert.equal(isDisplayed(forestUrgent, f({ forestOnly: true })), true);
+  // combines with the other (suppressive) filters via the same OR-hide rule
+  assert.equal(isDisplayed(indWeak, f({ forestOnly: true, showIndustrial: true, showWeakSignals: true })), false, 'industrial+weak event, even with those boxes ticked, still needs a real forest match once forestOnly is on');
 });
 
 test('displayFilters: all four combinations of the two boxes — list and map get the same single set, and each combination is exact', () => {

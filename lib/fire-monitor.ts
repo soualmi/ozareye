@@ -77,6 +77,14 @@ export type FireEvent = {
   windKph?: number; windDirectionFromDeg?: number; humidity?: number;
   villages?: VillageExposure[];
   landUse?: LandUseInfo;
+  // Real OSM forest cover (landuse=forest, natural=wood) at this event's
+  // centroid — see lib/forestcover.ts. Absent (not false) means "not yet
+  // looked up", same "undefined vs false" honesty as every other optional
+  // context field here; a missing/unreadable index also resolves to a
+  // literal `false`, never blocking or fabricating a state. This is exactly
+  // as good as OSM's own tagging in Algeria, not a satellite-derived
+  // vegetation survey — see lib/forestcover.ts's own module comment.
+  inForest?: boolean;
   notifiedAt?: string; notifiedScore?: number; notifiedStatus?: FireEvent['status'];
   // Meteosat/SLSTR fusion (see clusterDetections/scoreEvent below) —
   // recomputed from event.detections every poll, exactly like

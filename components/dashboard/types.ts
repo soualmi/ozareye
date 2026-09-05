@@ -45,6 +45,11 @@ export type DashboardEvent = {
   credits: string;
   landUseContext?: LandUseContext;
   landUseSiteName?: string;
+  // Real OSM forest cover (landuse=forest, natural=wood) at this event's
+  // centroid — see lib/forestcover.ts. Absent means not yet looked up;
+  // `false` means the local index was checked and found no match (or the
+  // index itself is missing — same fail-soft "false" either way).
+  inForest?: boolean;
   title: string;
   industrialLeadLine?: string;
   // Meteosat/SLSTR fusion: 'meteosat' means the position is a

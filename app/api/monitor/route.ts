@@ -23,7 +23,7 @@ import { fetchSlstrPasses } from '@/lib/slstr';
 // Persistent-source guard, signal-2 annotation and the land-use step live in
 // lib/monitor-pipeline.ts (testable against a temp DB) — see there for the
 // annotate-before-suppress ordering and the conditional industrial cap.
-import { applyLandUse, prepareDetections } from '@/lib/monitor-pipeline';
+import { applyForestCover, applyLandUse, prepareDetections } from '@/lib/monitor-pipeline';
 import { activeEvents, getConfig, initDb, isFirstRun, saveSignal, type EngineConfig } from '@/lib/database';
 import { bboxToString } from '@/scripts/build-villages';
 import { chatIdForWilaya } from '@/lib/wilaya-routing';
@@ -155,6 +155,7 @@ async function runMonitor(request: Request): Promise<Response> {
     const secondaryEligible = (raw.positionSource === 'meteosat' || raw.positionSource === 'slstr') && raw.status === 'corroborated';
     let event = (raw.score >= 55 || secondaryEligible) ? await enrichWeather(raw) : raw;
     event = await applyLandUse(event);
+    event = applyForestCover(event);
     const proximityKm = effectiveProximityKm(event, config.proximityKm);
     if (shouldAlert(event, config.proximityKm)) {
       const wilaya = eventWilaya(event);

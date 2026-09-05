@@ -60,6 +60,11 @@ export default function Dashboard() {
   // default too. The two opt-ins combine (see applyDisplayFilters): an
   // industrial event that is also 'observation' needs both ticked.
   const [showIndustrial, setShowIndustrial] = useState(false);
+  // Real OSM forest cover (lib/forestcover.ts) — off by default like the
+  // others, but the OPPOSITE intent: ticking it ISOLATES the view down to
+  // confirmed-forest events (a positive signal) rather than revealing a
+  // suspected-false-positive class. Same applyDisplayFilters combine.
+  const [forestOnly, setForestOnly] = useState(false);
 
   const [historyFrom, setHistoryFrom] = useState(() => new Date(Date.now() - 7 * 86_400_000).toISOString().slice(0, 10));
   const [historyTo, setHistoryTo] = useState(() => new Date().toISOString().slice(0, 10));
@@ -136,8 +141,9 @@ export default function Dashboard() {
   const loaded = tab === 'live' ? events : historyEvents;
   const weakCount = loaded.filter(e => e.status === 'observation').length;
   const industrialCount = loaded.filter(e => e.landUseContext === 'industrial').length;
+  const forestCount = loaded.filter(e => e.inForest === true).length;
   // One filtered set for BOTH the list and the map — never two computations.
-  const visible = applyDisplayFilters(loaded, { showWeakSignals, showIndustrial, hideUnknownWilaya });
+  const visible = applyDisplayFilters(loaded, { showWeakSignals, showIndustrial, hideUnknownWilaya, forestOnly });
   const unknownWilayaCount = loaded.filter(e => e.wilaya === null).length;
   const repeatedCount = visible.filter(e => e.passCount >= 2).length;
   const hiddenCount = loaded.length - visible.length;
@@ -270,6 +276,14 @@ export default function Dashboard() {
         <label className="flex items-center gap-2 border-b border-white/10 px-3 py-2 text-[11px] text-[#8da79d]">
           <input type="checkbox" checked={hideUnknownWilaya} onChange={e => setHideUnknownWilaya(e.target.checked)} className="accent-[#45d892]" />
           Masquer les points hors frontières{unknownWilayaCount > 0 ? ` (${unknownWilayaCount})` : ''}
+        </label>
+
+        {/* Real OSM forest cover — isolates the view rather than hiding a
+            suspected false positive; opposite intent from the two boxes
+            above but the same opt-in mechanism. */}
+        <label className="flex items-center gap-2 border-b border-white/10 px-3 py-2 text-[11px] text-[#8da79d]">
+          <input type="checkbox" checked={forestOnly} onChange={e => setForestOnly(e.target.checked)} className="accent-[#45d892]" data-testid="forest-only" />
+          N&apos;afficher que les foyers en forêt (couverture OSM réelle){forestCount > 0 ? ` (${forestCount})` : ''}
         </label>
 
         {/* Item 10: "Confirmés au sol" is structurally 0 — this system has no

@@ -100,16 +100,24 @@ export type DisplayFilters = {
   showIndustrial: boolean;
   /** Opt OUT: events with no wilaya (at sea / across a border) hidden when true. */
   hideUnknownWilaya: boolean;
+  /** Opt IN, isolate rather than suppress: hides events NOT confirmed as
+   *  real OSM forest cover (lib/forestcover.ts) when true. Unlike the other
+   *  three filters here, forest context is a POSITIVE/confirmatory signal
+   *  (more likely a genuine wildfire, not noise) — this box narrows the view
+   *  down to those, it doesn't hide a suspected-false-positive class. Same
+   *  OR-combine mechanism as the others, opposite intent. */
+  forestOnly: boolean;
 };
 
-export const DEFAULT_DISPLAY_FILTERS: DisplayFilters = { showWeakSignals: false, showIndustrial: false, hideUnknownWilaya: false };
+export const DEFAULT_DISPLAY_FILTERS: DisplayFilters = { showWeakSignals: false, showIndustrial: false, hideUnknownWilaya: false, forestOnly: false };
 
-type Filterable = { status: 'observation' | 'corroborated' | 'urgent'; landUseContext?: LandUseContext; wilaya: string | null };
+type Filterable = { status: 'observation' | 'corroborated' | 'urgent'; landUseContext?: LandUseContext; wilaya: string | null; inForest?: boolean };
 
 export function isDisplayed(event: Filterable, f: DisplayFilters): boolean {
   if (!f.showWeakSignals && event.status === 'observation') return false;
   if (!f.showIndustrial && event.landUseContext === 'industrial') return false;
   if (f.hideUnknownWilaya && event.wilaya === null) return false;
+  if (f.forestOnly && event.inForest !== true) return false;
   return true;
 }
 
@@ -147,6 +155,7 @@ export function toDashboardEvent(event: FireEvent, referenceTime: Date = new Dat
     disclaimer: LABELS.disclaimer,
     landUseContext: event.landUse?.context,
     landUseSiteName: event.landUse?.siteName,
+    inForest: event.inForest,
     title: eventTitle(event.landUse?.context),
     industrialLeadLine: isIndustrial ? industrialLeadLine(event.landUse!.siteName) : undefined,
     positionSource: event.positionSource ?? 'viirs',

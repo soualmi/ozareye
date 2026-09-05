@@ -9,8 +9,9 @@ import { EARLY_DETECTION_ANOMALY_MIN_SAMPLES, gridCell, type Detection, type Fir
 // database module is imported so the live data/signals.db is never touched.
 process.env.ALGERIE_FEUX_DB_PATH = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'algerie-feux-monitor-pipeline-test-')), 'signals.db');
 delete process.env.ALGERIE_FEUX_INDUSTRIAL_INDEX_PATH; // real shipped data/industrial-sites.json
+delete process.env.ALGERIE_FEUX_FOREST_INDEX_PATH; // real shipped data/forest-areas.json
 const { initDb, recordDetectionDay, recordFrpObservation, frpBaseline } = await import('./database');
-const { prepareDetections, applyLandUse } = await import('./monitor-pipeline');
+const { prepareDetections, applyLandUse, applyForestCover } = await import('./monitor-pipeline');
 await initDb();
 
 const PERSISTENT_SOURCE_DAYS = 10;
@@ -110,4 +111,29 @@ test('applyLandUse: a non-industrial event is completely unaffected, flag or no 
   const flagged = await applyLandUse(event({ ...OFF_SITE, detections: [viirsDet({ ...OFF_SITE, baselineFrpExceeded: true })] }));
   assert.equal(flagged.landUse?.context, 'natural');
   assert.equal(flagged.status, 'urgent');
+});
+
+// --- applyForestCover: purely additive, never touches status/score ----------
+
+// Real polygon in the shipped index (lib/forestcover.test.ts): natural=wood
+// "Bois de Cèdres", Kabylie — same real-index convention as BELLARA above.
+const FOREST_SITE = { latitude: 36.54, longitude: 5.46 };
+
+test('applyForestCover: a real forest polygon resolves inForest true, status/score untouched', () => {
+  const out = applyForestCover(event({ ...FOREST_SITE, status: 'observation', score: 20, detections: [viirsDet({ ...FOREST_SITE })] }));
+  assert.equal(out.inForest, true);
+  assert.equal(out.status, 'observation');
+  assert.equal(out.score, 20);
+});
+
+// OFF_SITE (used above for the land-use tests) turns out to sit near real
+// forest cover in the shipped index — a genuinely wooded part of Algeria,
+// not a bug — so a separate coordinate is used here instead, verified clear
+// of any matching forest area before writing this assertion (central Oran,
+// same one lib/forestcover.test.ts uses for the same reason).
+const NO_FOREST_SITE = { latitude: 35.6971, longitude: -0.6337 };
+
+test('applyForestCover: a non-forest event resolves inForest false', () => {
+  const out = applyForestCover(event({ ...NO_FOREST_SITE, detections: [viirsDet({ ...NO_FOREST_SITE })] }));
+  assert.equal(out.inForest, false);
 });
