@@ -34,6 +34,11 @@ export type DashboardEvent = {
   score: number;
   maxFrp: number; instrument: string; satellite: string;
   detectedAtIso: string; detectedAtAlgiers: string; ageMinutes: number;
+  // Full timeline: first pass / last pass, each "DD/MM à HH:MM" in Algiers
+  // time (detectedAtAlgiers above is the legacy time-only form), and the
+  // first->last span in minutes (0 for a single pass) — "actif depuis", as
+  // opposed to ageMinutes (last pass -> now, "détecté il y a").
+  firstDetectedAtIso: string; firstDetectedAtAlgiers: string; lastDetectedAtAlgiers: string; activeMinutes: number;
   windKph?: number; windDirectionFromDeg?: number; humidity?: number;
   passCount: number; maxPixelsInSinglePass: number;
   confidenceLabel: string; magnitude: string;

@@ -38,3 +38,11 @@ export function formatDetectedAgo(minutes: number): string {
   if (hours > 0) return m === 0 ? `${hours}h` : `${hours}h ${m}min`;
   return `${minutes}min`;
 }
+
+// "Actif depuis : 2j 12h" — the first->last pass span. Same day/hour/minute
+// wording as formatDetectedAgo (both sit on elapsedParts, which already
+// carries a day tier), kept as its own name so a call site reads as the
+// span it is, not as an age.
+export function formatActiveSince(minutes: number): string {
+  return formatDetectedAgo(minutes);
+}

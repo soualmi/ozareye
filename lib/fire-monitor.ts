@@ -870,6 +870,41 @@ export function algiersTime(iso: string) {
   return new Date(iso).toLocaleString('fr-FR', { timeZone: 'Africa/Algiers', hour: '2-digit', minute: '2-digit' });
 }
 
+// Date AND time in Africa/Algiers — "05/09 à 13:25". algiersTime() above
+// (time only) silently dropped the date, so a "dernier passage 01:05" on a
+// three-day-old event read as this morning. Built from formatToParts rather
+// than a locale string so the separator is ours, not the ICU build's, and
+// the Algiers day (UTC+1) is the one shown — a 23:30Z pass IS the next day
+// in Algiers, and must render as such.
+export function algiersDateTime(iso: string): string {
+  const parts = new Intl.DateTimeFormat('fr-FR', { timeZone: 'Africa/Algiers', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(new Date(iso));
+  const get = (type: string) => parts.find(p => p.type === type)?.value ?? '';
+  // ICU can render midnight as "24" in some builds/locales with hour12:false.
+  const hour = get('hour') === '24' ? '00' : get('hour');
+  return `${get('day')}/${get('month')} à ${hour}:${get('minute')}`;
+}
+
+// Minutes between an event's first and last satellite pass — how long the
+// heat source has been SEEN, as opposed to minutesSince(lastAcquiredAt)
+// (how long since it was last seen). Zero for a single pass.
+export function activeMinutes(event: Pick<FireEvent, 'firstAcquiredAt' | 'lastAcquiredAt'>): number {
+  return Math.max(0, Math.round((new Date(event.lastAcquiredAt).getTime() - new Date(event.firstAcquiredAt).getTime()) / 60000));
+}
+
+// The compact one-line detection timeline every surface agrees on (Telegram
+// here; the dashboard renders the same three facts as separate lines from
+// the same helpers). Three distinct clocks, named so they can't be confused:
+// première détection (first pass), dernier passage (last pass, WITH its
+// date), and "actif depuis" (first -> last, i.e. how long it has kept
+// showing up) alongside "il y a" (last pass -> now). A single-pass event
+// has no span yet, so it gets one timestamp and says so.
+export function timelineLine(event: Pick<FireEvent, 'firstAcquiredAt' | 'lastAcquiredAt'>, referenceTime = new Date()): string {
+  const ago = formatElapsed(minutesSince(event.lastAcquiredAt, referenceTime));
+  const active = activeMinutes(event);
+  if (active === 0) return `Détection : ${algiersDateTime(event.lastAcquiredAt)} (Alger, il y a ${ago}) · passage unique`;
+  return `1re détection : ${algiersDateTime(event.firstAcquiredAt)} · dernier passage : ${algiersDateTime(event.lastAcquiredAt)} (Alger, il y a ${ago}) · actif depuis ${formatElapsed(active)}`;
+}
+
 export { cardinalFr };
 
 // Coarse bucket instead of a decimal hour figure — SPREAD_FACTOR is a rule of
@@ -1062,7 +1097,6 @@ export function telegramText(event: FireEvent, referenceTime = new Date(), proxi
     }).join('\n')
     : LABELS.noVillage;
 
-  const ageMin = minutesSince(event.lastAcquiredAt, referenceTime);
   const wilaya = eventWilaya(event);
   const locationBit = wilaya ? ` · ${wilaya}` : '';
   // Leads the message, right after the title — a known industrial/energy
@@ -1101,7 +1135,10 @@ export function telegramText(event: FireEvent, referenceTime = new Date(), proxi
   const stationLine = nearestStationLine(nearestFireStation(event.latitude, event.longitude));
   const stationBit = stationLine ? `\n🚒 ${stationLine}` : '';
 
-  return `${icon} ${LABELS.headline} — À VÉRIFIER\n\n${meteosatOnlyBit}${slstrOnlyBit}${geoTrackedBit}${industrialBit}${villageLines}\n\n📍${event.latitude.toFixed(4)},${event.longitude.toFixed(4)}${locationBit} ${algiersTime(event.lastAcquiredAt)} (Alger, il y a ${formatElapsed(ageMin)}) · ${lastDetection.instrument}${frpBit}\nPreuves : ${evidenceLine(event)}${stationBit}\n\n⚠️${LABELS.disclaimer}\n${creditsLine(event)}`;
+  // Position line, then the timeline on its own line (timelineLine() above):
+  // the old "HH:MM (Alger, il y a Xh)" carried no date at all, so a pass
+  // from three days ago read as this morning's.
+  return `${icon} ${LABELS.headline} — À VÉRIFIER\n\n${meteosatOnlyBit}${slstrOnlyBit}${geoTrackedBit}${industrialBit}${villageLines}\n\n📍${event.latitude.toFixed(4)},${event.longitude.toFixed(4)}${locationBit} · ${lastDetection.instrument}${frpBit}\n🕓 ${timelineLine(event, referenceTime)}\nPreuves : ${evidenceLine(event)}${stationBit}\n\n⚠️${LABELS.disclaimer}\n${creditsLine(event)}`;
 }
 
 // Tier 1 early-warning notice (opt-in, ENABLE_EARLY_SIGNAL_NOTICE) — a

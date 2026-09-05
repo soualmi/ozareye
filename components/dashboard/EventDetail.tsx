@@ -16,7 +16,7 @@
 
 import { blowsTowardDeg, cardinalFr } from '@/lib/wind';
 import { displayName } from '@/lib/place-name';
-import { formatAge, formatDetectedAgo, wilayaLabel } from './format';
+import { formatActiveSince, formatAge, formatDetectedAgo, wilayaLabel } from './format';
 import StationLine from './StationLine';
 import type { DashboardEvent } from './types';
 
@@ -109,8 +109,10 @@ export default function EventDetail({ event, onBack }: { event: DashboardEvent; 
         <ul className="space-y-1 text-xs text-[#c9dbd3]">
           <li>Position : {event.latitude.toFixed(4)}, {event.longitude.toFixed(4)} · {wilayaLabel(event.wilaya)}</li>
           <li>Intensité : FRP {event.maxFrp.toFixed(1)} MW ({event.magnitude})</li>
-          <li>Dernier passage satellite : {event.detectedAtAlgiers} (Alger)</li>
-          {event.ageMinutes > 0 && <li>Détecté il y a {formatDetectedAgo(event.ageMinutes)}</li>}
+          <li>Première détection : {event.firstDetectedAtAlgiers} (Alger)</li>
+          <li>Dernier passage : {event.lastDetectedAtAlgiers} (Alger)</li>
+          {event.activeMinutes > 0 && <li>Actif depuis : {formatActiveSince(event.activeMinutes)} (première → dernière détection)</li>}
+          {event.ageMinutes > 0 && <li>Détecté il y a {formatDetectedAgo(event.ageMinutes)} (dernier passage → maintenant)</li>}
           <li>Satellites : {satelliteNames || '—'}</li>
         </ul>
 

@@ -22,7 +22,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Circle, MapContainer, Marker, Polyline, Popup, TileLayer, Tooltip, useMap, useMapEvents } from 'react-leaflet';
 import { blowsTowardDeg } from '@/lib/wind';
 import { displayName } from '@/lib/place-name';
-import { formatAge, wilayaLabel } from './format';
+import { formatActiveSince, formatAge, wilayaLabel } from './format';
 import Legend from './Legend';
 import StationLine from './StationLine';
 import type { DashboardEvent, VillageBase } from './types';
@@ -30,7 +30,7 @@ import type { DashboardEvent, VillageBase } from './types';
 const VILLAGE_ZOOM_THRESHOLD = 11;
 
 function markerLabel(event: DashboardEvent): string {
-  return `Anomalie thermique, ${wilayaLabel(event.wilaya)}, FRP ${event.maxFrp.toFixed(1)} MW, détectée à ${event.detectedAtAlgiers}`;
+  return `Anomalie thermique, ${wilayaLabel(event.wilaya)}, FRP ${event.maxFrp.toFixed(1)} MW, dernier passage ${event.lastDetectedAtAlgiers}`;
 }
 
 function escapeHtml(s: string) {
@@ -159,8 +159,9 @@ function FirePopup({ event, onDetail }: { event: DashboardEvent; onDetail: (id: 
       {event.geoTracked && <div style={{ marginTop: 4, color: '#4fa3ff' }}>🛰 Suivi Meteosat actif</div>}
       <div>{[nearest, wilayaLabel(event.wilaya)].filter(Boolean).join(' · ')}</div>
       <div>{capitalize(magnitudeShort)}</div>
-      <div>Dernier passage satellite : {event.detectedAtAlgiers} (Alger)</div>
-      <div>Détectée il y a {formatAge(event.ageMinutes)}</div>
+      <div>Première détection : {event.firstDetectedAtAlgiers} (Alger)</div>
+      <div>Dernier passage : {event.lastDetectedAtAlgiers} (Alger){event.ageMinutes > 0 ? ` · détectée il y a ${formatAge(event.ageMinutes)}` : ''}</div>
+      {event.activeMinutes > 0 && <div>Actif depuis : {formatActiveSince(event.activeMinutes)}</div>}
       <div style={{ marginTop: 4 }}>{event.sourceStatusLine}</div>
       <div>{proximityCount} village(s) à proximité, {downwindCount} sous le vent</div>
       {event.nearestStationLine && <div style={{ marginTop: 4 }}><StationLine event={event} compact /></div>}

@@ -20,7 +20,7 @@
 // no fabricated trajectories). Telegram's telegramText() is untouched and
 // unrelated to this.
 import {
-  LABELS, algiersTime, confidenceLabel, creditsLine, distinctPasses, eventWilaya, evidenceLine, industrialLeadLine, magnitudeLabel, minutesSince, selectExposedVillages,
+  LABELS, activeMinutes, algiersDateTime, algiersTime, confidenceLabel, creditsLine, distinctPasses, eventWilaya, evidenceLine, industrialLeadLine, magnitudeLabel, minutesSince, selectExposedVillages,
   type FireEvent, type LandUseContext,
 } from './fire-monitor';
 import { satelliteName } from './satellite-names';
@@ -155,6 +155,14 @@ export function toDashboardEvent(event: FireEvent, referenceTime: Date = new Dat
     maxFrp: event.maxFrp, instrument: last.instrument, satellite: satelliteName(last.satellite),
     detectedAtIso: event.lastAcquiredAt, detectedAtAlgiers: algiersTime(event.lastAcquiredAt),
     ageMinutes: minutesSince(event.lastAcquiredAt, referenceTime),
+    // The full detection timeline (same helpers as Telegram's timelineLine):
+    // first pass and last pass each WITH their Algiers date — detectedAtAlgiers
+    // above is time-only and silently dropped the date, so a three-day-old
+    // event's "dernier passage 01:05" read as this morning — plus the
+    // first->last span ("actif depuis"), distinct from ageMinutes (last->now).
+    firstDetectedAtIso: event.firstAcquiredAt, firstDetectedAtAlgiers: algiersDateTime(event.firstAcquiredAt),
+    lastDetectedAtAlgiers: algiersDateTime(event.lastAcquiredAt),
+    activeMinutes: activeMinutes(event),
     windKph: event.windKph, windDirectionFromDeg: event.windDirectionFromDeg, humidity: event.humidity,
     passCount: event.passCount, maxPixelsInSinglePass: event.maxPixelsInSinglePass,
     confidenceLabel: confidenceLabel(event.maxConfidence),

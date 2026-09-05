@@ -22,18 +22,21 @@ import { useEffect, useMemo, useState } from 'react';
 import EventDetail from '@/components/dashboard/EventDetail';
 import EmergencyNumbers from '@/components/dashboard/EmergencyNumbers';
 import StationLine from '@/components/dashboard/StationLine';
-import { formatDetectedAgo, wilayaLabel } from '@/components/dashboard/format';
+import { formatActiveSince, formatDetectedAgo, wilayaLabel } from '@/components/dashboard/format';
 import { displayName } from '@/lib/place-name';
 import { applyDisplayFilters, nearestFeatureLine } from '@/lib/dashboard-view';
+import { LIVE_REFRESH_MS, startLivePolling } from '@/lib/live-poll';
 import type { DashboardEvent, SourceStatus } from '@/components/dashboard/types';
 
 const DashboardMap = dynamic(() => import('@/components/dashboard/Map'), { ssr: false, loading: () => <div className="grid h-full place-items-center text-sm text-[#8da79d]">Chargement de la carte…</div> });
 
 const STATUS_COLOR: Record<DashboardEvent['status'], string> = { urgent: '#ff5b32', corroborated: '#f5b942', observation: '#4fa37a' };
-const REFRESH_MS = 5 * 60_000;
 
 function algiersHm(iso: string) {
   return new Date(iso).toLocaleTimeString('fr-FR', { timeZone: 'Africa/Algiers', hour: '2-digit', minute: '2-digit' });
+}
+function algiersHms(iso: string) {
+  return new Date(iso).toLocaleTimeString('fr-FR', { timeZone: 'Africa/Algiers', hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
 export default function Dashboard() {
@@ -45,6 +48,10 @@ export default function Dashboard() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
+  // When THIS page last successfully pulled /api/dashboard/events — the
+  // auto-refresh's own heartbeat, distinct from lastSyncAt (when the
+  // monitor last got data out of a source). Shown as "Mis à jour à".
+  const [refreshedAt, setRefreshedAt] = useState<string | null>(null);
   const [sources, setSources] = useState<SourceStatus[]>([]);
   const [panelOpen, setPanelOpen] = useState(true);
   const [hideUnknownWilaya, setHideUnknownWilaya] = useState(false);
@@ -93,18 +100,30 @@ export default function Dashboard() {
     const r = await fetch(`/api/dashboard/events?${params}`);
     if (r.status === 401) { window.location.href = '/login'; return; }
     const d = await r.json() as { events: DashboardEvent[]; lastSyncAt: string | null; sources?: SourceStatus[] };
+    // Only the event data and the header's source/sync facts change here —
+    // never a filter (showWeakSignals/showIndustrial/hideUnknownWilaya/
+    // forestOnly/wilayaFilter) nor the selection, so an auto-refresh leaves
+    // the reader's view exactly as they set it.
     setEvents(d.events);
     setLastSyncAt(d.lastSyncAt ?? null);
     setSources(d.sources ?? []);
+    setRefreshedAt(new Date().toISOString());
   }
 
   useEffect(() => {
     if (!authChecked) return;
-    loadEvents();
     fetch('/api/dashboard/wilayas').then(r => r.json() as Promise<{ wilayas: string[] }>).then(d => setWilayas(d.wilayas)).catch(() => {});
-    const id = setInterval(loadEvents, REFRESH_MS);
-    return () => clearInterval(id);
-  }, [authChecked, wilayaFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [authChecked]);
+
+  // "En direct" auto-refresh (lib/live-poll.ts): the same loadEvents on a
+  // 75s interval, paused while the tab is hidden, one immediate catch-up on
+  // return. Restarts when the wilaya filter changes (loadEvents closes over
+  // it) and stops entirely on the Historique tab, which has a fixed range.
+  useEffect(() => {
+    if (!authChecked || tab !== 'live') return;
+    loadEvents();
+    return startLivePolling({ run: loadEvents, intervalMs: LIVE_REFRESH_MS });
+  }, [authChecked, tab, wilayaFilter]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // A failed request used to fall through to `?? []`, rendering the same
   // "Aucun événement" as a genuinely empty range — the two are now distinct:
@@ -186,6 +205,10 @@ export default function Dashboard() {
               this page happened to re-render, which is what "mise à jour"
               used to show and which is never stale by construction. */}
           <span className="text-[#8da79d]">{lastSyncAt ? `Dernière synchronisation : ${algiersHm(lastSyncAt)}` : 'Synchronisation inconnue'}</span>
+          {/* The page's own auto-refresh heartbeat (75s, paused when the tab
+              is hidden) — seconds included so two consecutive refreshes are
+              visibly different. Live tab only; Historique doesn't poll. */}
+          {tab === 'live' && refreshedAt && <span className="text-[#5f7a70]" data-testid="refreshed-at" title="Actualisation automatique toutes les 75 s (en pause quand l'onglet est masqué)">Mis à jour à {algiersHms(refreshedAt)}</span>}
           {sources.length > 0 && (
             <span className="flex flex-wrap items-center gap-1.5">
               {sources.map(src => (
@@ -323,7 +346,7 @@ function EventList({ events, onSelect, emptyMessage }: { events: DashboardEvent[
                 <span className="h-2 w-2 rounded-full" style={{ background: STATUS_COLOR[ev.status] }} />
                 {wilayaLabel(ev.wilaya)}
               </span>
-              <span className="text-xs text-[#8da79d]">{ev.detectedAtAlgiers}</span>
+              <span className="text-xs text-[#8da79d]">{ev.lastDetectedAtAlgiers}</span>
             </div>
             {/* One plain sentence first (industrial events carry their
                 lead line instead — never both). Then the technical fields. */}
@@ -333,10 +356,17 @@ function EventList({ events, onSelect, emptyMessage }: { events: DashboardEvent[
             <p className="mt-1 text-xs text-[#8da79d]">FRP {ev.maxFrp.toFixed(1)}MW{nearestLine ? ` · ${nearestLine}` : ''}</p>
             <p className="mt-1 text-[11px] text-[#8da79d]">{ev.sourceStatusLine}</p>
             {ev.nearestStationLine && <p className="mt-1 text-[11px] text-[#c9dbd3]"><StationLine event={ev} /></p>}
-            {/* /history measures age from the event's own last pass, so its
-                events carry ageMinutes 0 — the absolute time is always shown,
-                the elapsed time only when it is a real one. */}
-            <p className="mt-0.5 text-[11px] text-[#5f7a70]">Dernier passage satellite : {ev.detectedAtAlgiers}{ev.ageMinutes > 0 ? ` · Détecté il y a ${formatDetectedAgo(ev.ageMinutes)}` : ''}</p>
+            {/* Full timeline, three distinct clocks: first pass, last pass
+                (both WITH their date — the old time-only form made a
+                three-day-old pass read as this morning's), and the
+                first->last span. /history measures age from the event's own
+                last pass, so its events carry ageMinutes 0 — the absolute
+                times are always shown, the elapsed time only when real. */}
+            <p className="mt-0.5 text-[11px] text-[#5f7a70]" data-testid="timeline">
+              Première détection : {ev.firstDetectedAtAlgiers} (Alger)<br />
+              Dernier passage : {ev.lastDetectedAtAlgiers} (Alger){ev.ageMinutes > 0 ? ` · détecté il y a ${formatDetectedAgo(ev.ageMinutes)}` : ''}
+              {ev.activeMinutes > 0 && <><br />Actif depuis : {formatActiveSince(ev.activeMinutes)}</>}
+            </p>
           </button>
         );
       })}
