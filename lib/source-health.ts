@@ -83,16 +83,25 @@ export function evaluateSourceHealth(source: string, current: SourceHealthRow | 
 
 export type AdminNotifier = (text: string) => Promise<void>;
 
-async function defaultAdminNotify(text: string): Promise<void> {
+// Return type is wider than AdminNotifier's Promise<void> (TypeScript's
+// standard void-return compatibility: a function returning something IS
+// assignable where a void-returning callback is expected), so this stays a
+// valid `opts.notify ?? defaultAdminNotify` default for recordSourceOutcome
+// below while also letting other call sites — e.g. scripts/replay.ts's
+// completion/failure notice — read back the sent message's id, instead of
+// reimplementing the Telegram POST just to get it.
+export async function defaultAdminNotify(text: string): Promise<{ message_id: number } | undefined> {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.ADMIN_TELEGRAM_CHAT_ID;
-  if (!botToken || !chatId) { console.log(`source-health: admin notify skipped, ADMIN_TELEGRAM_CHAT_ID not configured — would have sent: ${text}`); return; }
+  if (!botToken || !chatId) { console.log(`source-health: admin notify skipped, ADMIN_TELEGRAM_CHAT_ID not configured — would have sent: ${text}`); return undefined; }
   const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ chat_id: chatId, text }),
     signal: AbortSignal.timeout(10_000),
   });
   if (!response.ok) throw new Error(`Telegram admin notify HTTP ${response.status}`);
+  const data = await response.json() as { result?: { message_id: number } };
+  return data.result;
 }
 
 // Fail-soft by design: this runs alongside the fire-alert pipeline and must

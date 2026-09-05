@@ -18,10 +18,15 @@
 //
 //   npm run replay -- --from 2026-08-25 --to 2026-08-29 --db data/replay-20260826.db --out replay-out/20260826
 //   npm run replay -- 2026-08-26                  (single day, defaults elsewhere)
+//   npm run replay -- --with-meteosat --with-slstr --notify ...  (fused 3-source run, admin Telegram on completion)
 //
-// Sends nothing: alerts are rendered with the real telegramText() and written
-// to messages/*.txt. Writes only to --db (never data/signals.db — lib/replay.ts
-// refuses) and --out. See lib/replay.test.ts for both guarantees.
+// Sends nothing to end users: alerts are rendered with the real telegramText()
+// and written to messages/*.txt. Writes only to --db (never data/signals.db —
+// lib/replay.ts refuses) and --out. See lib/replay.test.ts for both guarantees.
+// The one exception is --notify (opt-in, off by default): a single admin-only
+// Telegram message on completion or failure, via the same defaultAdminNotify
+// (lib/source-health.ts) the watchdog already uses — never the fire-alert
+// pipeline, so it can never look like or trigger a fire alert.
 import fs from 'node:fs';
 import path from 'node:path';
 import { bearingDeg } from '../lib/geo';
@@ -61,6 +66,12 @@ const delayMs = Number(arg('delay', '1200'));
 // Off by default so the original VIIRS-only command still reproduces the
 // original run unchanged (see lib/replay.ts's ReplayOptions.withMeteosat).
 const withMeteosat = process.argv.includes('--with-meteosat');
+// Same rationale as withMeteosat above, combinable with it (see
+// lib/replay.ts's ReplayOptions.withSlstr).
+const withSlstr = process.argv.includes('--with-slstr');
+// Opt-in admin-only Telegram notice on completion/failure — off by default
+// so an ad-hoc dev/test replay run doesn't page anyone.
+const notify = process.argv.includes('--notify');
 // Rebuilds report.md from an existing events.json without re-fetching anything
 // — the report layout is the part most likely to need another pass.
 const renderOnly = process.argv.includes('--render-only');
@@ -91,6 +102,19 @@ const { runReplay, CRON_INTERVAL_MIN } = await import('../lib/replay');
 const { algiersTime, confidenceLabel, distinctPasses, eventWilaya, lowerStatus, DEFAULT_PROXIMITY_KM, EARLY_DETECTION_ANOMALY_MIN_SAMPLES } = await import('../lib/fire-monitor');
 const { satelliteName } = await import('../lib/satellite-names');
 const { getConfig, eventsBetween, saveSignal } = await import('../lib/database');
+// Dynamic for the same reason as the imports above: lib/source-health.ts
+// transitively imports lib/database, which must not resolve its backend
+// before ALGERIE_FEUX_DB_PATH is set.
+const { defaultAdminNotify } = await import('../lib/source-health');
+
+// "VIIRS+Meteosat+Sentinel-3" / "VIIRS+Meteosat" / "VIIRS+Sentinel-3" / "VIIRS"
+// — used only by the --notify admin message below, built from the actual
+// flags this run used rather than a hardcoded string, so it stays honest
+// across whichever combination of --with-meteosat/--with-slstr was passed.
+function sourcesLabel(): string {
+  const extra = [withMeteosat ? 'Meteosat' : null, withSlstr ? 'Sentinel-3' : null].filter((s): s is string => s !== null);
+  return extra.length ? `VIIRS+${extra.join('+')}` : 'VIIRS';
+}
 
 const mapKey = process.env.FIRMS_MAP_KEY;
 if (!mapKey) {
@@ -183,154 +207,12 @@ type RunMeta = {
 const eventsPath = path.join(outDir, 'events.json');
 const metaPath = path.join(outDir, 'run-meta.json');
 
-// --render-only rebuilds report.md from the last run's events.json: the report
-// layout gets iterated on far more often than the data behind it, and a re-run
-// would re-fetch five days of FIRMS to produce identical events.
-if (renderOnly) {
-  if (!fs.existsSync(eventsPath)) { console.error(`--render-only needs an existing ${eventsPath}`); process.exit(1); }
-  proximityKm = (await getConfig()).proximityKm;
-  const eventsOut = JSON.parse(fs.readFileSync(eventsPath, 'utf8')) as EventOut[];
-  const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as RunMeta;
-  fs.writeFileSync(path.join(outDir, 'report.md'), renderReport(eventsOut, meta));
-  const renamed = renameMessageVillages(path.join(outDir, 'messages'));
-  console.log(`Re-rendered ${outDir}/report.md from ${eventsOut.length} stored event(s); renamed villages in ${renamed} message file(s).`);
-  process.exit(0);
-}
-
-// --reevaluate-landuse: the original run at this dbPath predates
-// data/industrial-sites.json (Overpass was unreachable, so every event was
-// left 'unknown' or unevaluated). Re-scores every stored event with the
-// CURRENT lookupLandUse() — the local index, no network — updates the
-// replay DB and events.json, then re-renders exactly like --render-only.
-// No FIRMS or weather calls: detections/passes/wind are untouched.
-if (reevaluateLandUse) {
-  if (!fs.existsSync(eventsPath)) { console.error(`--reevaluate-landuse needs an existing ${eventsPath}`); process.exit(1); }
-  const { lookupLandUse } = await import('../lib/landuse');
-  proximityKm = (await getConfig()).proximityKm;
-
-  const eventsOut = JSON.parse(fs.readFileSync(eventsPath, 'utf8')) as EventOut[];
-  const stored = await eventsBetween('2000-01-01T00:00:00.000Z', '2100-01-01T00:00:00.000Z', 100_000);
-  const storedById = new Map(stored.map(e => [e.id, e] as const));
-
-  let industrial = 0, natural = 0, unknown = 0;
-  for (const out of eventsOut) {
-    const landUse = await lookupLandUse(out.latitude, out.longitude);
-    out.landUse = landUse;
-    const full = storedById.get(out.id);
-    if (full) {
-      const updated = landUse.context === 'industrial'
-        ? { ...full, landUse, status: lowerStatus(full.status) }
-        : { ...full, landUse };
-      await saveSignal(updated);
-      out.status = updated.status;
-    }
-    if (landUse.context === 'industrial') industrial++;
-    else if (landUse.context === 'natural') natural++;
-    else unknown++;
-  }
-
-  fs.writeFileSync(eventsPath, JSON.stringify(eventsOut, null, 2) + '\n');
-  const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as RunMeta;
-  meta.landUseReevaluatedWithLocalIndex = true;
-  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2) + '\n');
-
-  fs.writeFileSync(path.join(outDir, 'report.md'), renderReport(eventsOut, meta));
-  const renamed = renameMessageVillages(path.join(outDir, 'messages'));
-
-  const notesPath = path.join(outDir, 'run-notes.md');
-  if (fs.existsSync(notesPath)) {
-    fs.appendFileSync(notesPath, [
-      '',
-      `## Occupation du sol — réévaluation post-hoc (${new Date().toISOString()})`,
-      '',
-      `Overpass était injoignable pendant le rejeu original (voir plus haut). Réévalué depuis avec l'index local (\`data/industrial-sites.json\`, construit une fois par \`scripts/build-industrial-index.ts\`, sans appel réseau) : **${industrial} événement(s) industriel(s)**, ${natural} naturel(s), ${unknown} encore indéterminé(s) sur ${eventsOut.length}.`,
-      `Le garde-fou « source permanente sur 30 jours » (point 5 plus haut) reste non appliqué : cette réévaluation ne change que le marquage par site industriel connu, pas les autres filtres.`,
-      '',
-    ].join('\n'));
-  }
-
-  console.log(`Re-evaluated land-use for ${eventsOut.length} event(s) with the local index: ${industrial} industrial, ${natural} natural, ${unknown} unknown.`);
-  console.log(`Re-rendered ${outDir}/report.md; renamed villages in ${renamed} message file(s).`);
-  process.exit(0);
-}
-
-console.log(`Replay ${from} → ${to} · db ${dbPath} · out ${outDir}${withMeteosat ? ' · +Meteosat (MTG_FIR)' : ''}`);
-const started = new Date();
-const result = await runReplay({
-  from, to, mapKey, box, landUseDelayMs: delayMs, withMeteosat,
-  log: msg => console.log(msg),
-});
-const finished = new Date();
-// After runReplay, which is what creates the schema in the fresh replay DB.
-proximityKm = (await getConfig()).proximityKm;
-
-// ---------- a) events.json ----------
-const eventsOut: EventOut[] = result.events
-  .slice()
-  .sort((a, b) => a.firstAcquiredAt.localeCompare(b.firstAcquiredAt))
-  .map(event => {
-    const wilaya = eventWilaya(event);
-    const all = event.villages ?? [];
-    const passes = passRecords(event);
-    return {
-      id: event.id,
-      wilaya: wilaya ?? null,
-      wilayaLabel: wilaya ?? OUT_OF_BOUNDS,
-      latitude: event.latitude, longitude: event.longitude,
-      firstDetectionUtc: event.firstAcquiredAt,
-      firstDetectionAlgiers: algiersTime(event.firstAcquiredAt),
-      lastDetectionUtc: event.lastAcquiredAt,
-      lastDetectionAlgiers: algiersTime(event.lastAcquiredAt),
-      passes,
-      passCount: event.passCount,
-      maxPixelsInSinglePass: event.maxPixelsInSinglePass,
-      maxFrpMw: event.maxFrp,
-      maxConfidence: event.maxConfidence,
-      score: event.score,
-      status: event.status,
-      // villages are only computed once wind is known (score >= 55 gate), so
-      // null here means "not evaluated", not "none nearby".
-      villagesEvaluated: event.villages !== undefined,
-      nearbyVillages: all.filter(v => v.distanceKm <= proximityKm).map(v => ({ name: displayName(v), rawName: v.name, nameAr: v.name_ar, wilaya: v.wilaya, distanceKm: Number(v.distanceKm.toFixed(2)) })),
-      downwindVillages: all.filter(v => v.relation !== 'upwind' && v.distanceKm > proximityKm).map(v => ({
-        name: displayName(v), rawName: v.name, nameAr: v.name_ar, wilaya: v.wilaya,
-        distanceKm: Number(v.distanceKm.toFixed(2)),
-        bearingFromFireDeg: Number(bearingDeg(event.latitude, event.longitude, v.lat, v.lon).toFixed(1)),
-        bearingFromFireCardinal: cardinalFr(bearingDeg(event.latitude, event.longitude, v.lat, v.lon)),
-        relation: v.relation,
-      })),
-      windUsed: windUsed(event),
-      landUse: event.landUse ?? { context: 'not-evaluated' },
-      wouldHaveAlerted: result.alerts.some(a => a.eventId === event.id),
-    };
-  });
-fs.writeFileSync(eventsPath, JSON.stringify(eventsOut, null, 2) + '\n');
-fs.writeFileSync(metaPath, JSON.stringify({ box: result.box, days: result.days, detectionsPerDay: result.detectionsPerDay, landUseCircuitOpen: result.landUseCircuitOpen }, null, 2) + '\n');
-
-// ---------- c) messages/ ----------
-const firstAlertPerEvent = new Map<string, typeof result.alerts[number]>();
-for (const a of result.alerts) if (!firstAlertPerEvent.has(a.eventId)) firstAlertPerEvent.set(a.eventId, a);
-const focusAlerts = [...firstAlertPerEvent.values()]
-  .map(a => ({ alert: a, event: eventsOut.find(e => e.id === a.eventId)! }))
-  .filter(x => x.event && FOCUS_WILAYAS.includes(x.event.wilaya ?? ''))
-  .sort((a, b) => b.event.maxFrpMw - a.event.maxFrpMw)
-  .slice(0, 5);
-
-focusAlerts.forEach((x, i) => {
-  const name = `${String(i + 1).padStart(2, '0')}-${(x.event.wilaya ?? 'inconnue').replace(/\s+/g, '-')}-frp${Math.round(x.event.maxFrpMw)}.txt`;
-  const header = [
-    `# NON ENVOYÉ — rendu par replay (${new Date().toISOString().slice(0, 10)})`,
-    `# événement ${x.event.id}`,
-    `# première détection ${x.event.firstDetectionAlgiers} (Alger) / ${x.event.firstDetectionUtc}`,
-    `# message rendu tel qu'il serait parti au passage du cron de ${x.alert.renderedAtIso} —`,
-    `#   la première exécution (cadence ${CRON_INTERVAL_MIN} min) ayant vu assez de preuves pour alerter`,
-    `# à cet instant : FRP max ${x.alert.maxFrp.toFixed(1)} MW, score ${x.alert.score}, statut ${x.alert.status}`,
-    '', '',
-  ].join('\n');
-  fs.writeFileSync(path.join(outDir, 'messages', name), header + x.alert.text + '\n');
-});
-
-// ---------- b) report.md ----------
+// Pure rendering helpers, declared here (true module scope, not nested in
+// the try block below the main runReplay() call) because --render-only and
+// --reevaluate-landuse both call renderReport() from their own early-return
+// paths above, before that try block even exists — a function declaration
+// nested inside a block is only visible within that block, regardless of
+// where in the file it appears textually.
 
 // events.json written before the French/Latin naming rule existed stores the
 // raw OSM name; resolving it here means --render-only fixes an old report
@@ -440,6 +322,195 @@ function renderReport(eventsOut: EventOut[], meta: RunMeta): string {
   return lines.join('\n');
 }
 
+// --render-only rebuilds report.md from the last run's events.json: the report
+// layout gets iterated on far more often than the data behind it, and a re-run
+// would re-fetch five days of FIRMS to produce identical events.
+if (renderOnly) {
+  if (!fs.existsSync(eventsPath)) { console.error(`--render-only needs an existing ${eventsPath}`); process.exit(1); }
+  proximityKm = (await getConfig()).proximityKm;
+  const eventsOut = JSON.parse(fs.readFileSync(eventsPath, 'utf8')) as EventOut[];
+  const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as RunMeta;
+  fs.writeFileSync(path.join(outDir, 'report.md'), renderReport(eventsOut, meta));
+  const renamed = renameMessageVillages(path.join(outDir, 'messages'));
+  console.log(`Re-rendered ${outDir}/report.md from ${eventsOut.length} stored event(s); renamed villages in ${renamed} message file(s).`);
+  process.exit(0);
+}
+
+// --reevaluate-landuse: the original run at this dbPath predates
+// data/industrial-sites.json (Overpass was unreachable, so every event was
+// left 'unknown' or unevaluated). Re-scores every stored event with the
+// CURRENT lookupLandUse() — the local index, no network — updates the
+// replay DB and events.json, then re-renders exactly like --render-only.
+// No FIRMS or weather calls: detections/passes/wind are untouched.
+if (reevaluateLandUse) {
+  if (!fs.existsSync(eventsPath)) { console.error(`--reevaluate-landuse needs an existing ${eventsPath}`); process.exit(1); }
+  const { lookupLandUse } = await import('../lib/landuse');
+  proximityKm = (await getConfig()).proximityKm;
+
+  const eventsOut = JSON.parse(fs.readFileSync(eventsPath, 'utf8')) as EventOut[];
+  const stored = await eventsBetween('2000-01-01T00:00:00.000Z', '2100-01-01T00:00:00.000Z', 100_000);
+  const storedById = new Map(stored.map(e => [e.id, e] as const));
+
+  let industrial = 0, natural = 0, unknown = 0;
+  for (const out of eventsOut) {
+    const landUse = await lookupLandUse(out.latitude, out.longitude);
+    out.landUse = landUse;
+    const full = storedById.get(out.id);
+    if (full) {
+      const updated = landUse.context === 'industrial'
+        ? { ...full, landUse, status: lowerStatus(full.status) }
+        : { ...full, landUse };
+      await saveSignal(updated);
+      out.status = updated.status;
+    }
+    if (landUse.context === 'industrial') industrial++;
+    else if (landUse.context === 'natural') natural++;
+    else unknown++;
+  }
+
+  fs.writeFileSync(eventsPath, JSON.stringify(eventsOut, null, 2) + '\n');
+  const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as RunMeta;
+  meta.landUseReevaluatedWithLocalIndex = true;
+  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2) + '\n');
+
+  fs.writeFileSync(path.join(outDir, 'report.md'), renderReport(eventsOut, meta));
+  const renamed = renameMessageVillages(path.join(outDir, 'messages'));
+
+  const notesPath = path.join(outDir, 'run-notes.md');
+  if (fs.existsSync(notesPath)) {
+    fs.appendFileSync(notesPath, [
+      '',
+      `## Occupation du sol — réévaluation post-hoc (${new Date().toISOString()})`,
+      '',
+      `Overpass était injoignable pendant le rejeu original (voir plus haut). Réévalué depuis avec l'index local (\`data/industrial-sites.json\`, construit une fois par \`scripts/build-industrial-index.ts\`, sans appel réseau) : **${industrial} événement(s) industriel(s)**, ${natural} naturel(s), ${unknown} encore indéterminé(s) sur ${eventsOut.length}.`,
+      `Le garde-fou « source permanente sur 30 jours » (point 5 plus haut) reste non appliqué : cette réévaluation ne change que le marquage par site industriel connu, pas les autres filtres.`,
+      '',
+    ].join('\n'));
+  }
+
+  console.log(`Re-evaluated land-use for ${eventsOut.length} event(s) with the local index: ${industrial} industrial, ${natural} natural, ${unknown} unknown.`);
+  console.log(`Re-rendered ${outDir}/report.md; renamed villages in ${renamed} message file(s).`);
+  process.exit(0);
+}
+
+// --notify: a single admin-only Telegram message when the run finishes,
+// success or failure — reusing lib/source-health.ts's defaultAdminNotify
+// (the exact function the watchdog already uses for incident/recovery
+// messages) rather than posting to Telegram a second, separate way. Never
+// routed through the fire-alert pipeline (telegramText()/app/api/monitor),
+// so it can never look like or trigger a fire alert.
+async function notifyFailure(reason: string): Promise<void> {
+  if (!notify) return;
+  try {
+    const sent = await defaultAdminNotify(`❌ Rejeu 26 août (${sourcesLabel()}) a échoué : ${reason.slice(0, 300)}`);
+    console.log(sent ? `Admin notify (failure) sent: message_id ${sent.message_id}` : 'Admin notify (failure) skipped — ADMIN_TELEGRAM_CHAT_ID not configured');
+  } catch (notifyError) {
+    console.error(`Admin notify FAILED: ${notifyError instanceof Error ? notifyError.message : notifyError}`);
+  }
+}
+// Covers "interrupted", not just "raised an exception" — a Ctrl-C or a
+// process kill mid-run must still produce the failure notice the task asks
+// for, not just an uncaught-exception path.
+if (notify) {
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.once(signal, () => {
+      console.error(`\nReplay interrupted (${signal})`);
+      notifyFailure(`interrompu (${signal})`).finally(() => process.exit(1));
+    });
+  }
+}
+
+console.log(`Replay ${from} → ${to} · db ${dbPath} · out ${outDir}${withMeteosat ? ' · +Meteosat (MTG_FIR)' : ''}${withSlstr ? ' · +Sentinel-3 (SLSTR)' : ''}`);
+const started = new Date();
+let result: Awaited<ReturnType<typeof runReplay>>;
+try {
+  result = await runReplay({
+    from, to, mapKey, box, landUseDelayMs: delayMs, withMeteosat, withSlstr,
+    log: msg => console.log(msg),
+  });
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`Replay FAILED: ${message}`);
+  await notifyFailure(message);
+  throw error;
+}
+const finished = new Date();
+// Report/notes generation wrapped too: any failure here (a bug in the
+// rendering below, a disk-full writeFileSync, ...) must still produce the
+// admin failure notice — "the replay" the task asks to notify on is this
+// whole run, not just the fetch/cluster phase above.
+try {
+
+// After runReplay, which is what creates the schema in the fresh replay DB.
+proximityKm = (await getConfig()).proximityKm;
+
+// ---------- a) events.json ----------
+const eventsOut: EventOut[] = result.events
+  .slice()
+  .sort((a, b) => a.firstAcquiredAt.localeCompare(b.firstAcquiredAt))
+  .map(event => {
+    const wilaya = eventWilaya(event);
+    const all = event.villages ?? [];
+    const passes = passRecords(event);
+    return {
+      id: event.id,
+      wilaya: wilaya ?? null,
+      wilayaLabel: wilaya ?? OUT_OF_BOUNDS,
+      latitude: event.latitude, longitude: event.longitude,
+      firstDetectionUtc: event.firstAcquiredAt,
+      firstDetectionAlgiers: algiersTime(event.firstAcquiredAt),
+      lastDetectionUtc: event.lastAcquiredAt,
+      lastDetectionAlgiers: algiersTime(event.lastAcquiredAt),
+      passes,
+      passCount: event.passCount,
+      maxPixelsInSinglePass: event.maxPixelsInSinglePass,
+      maxFrpMw: event.maxFrp,
+      maxConfidence: event.maxConfidence,
+      score: event.score,
+      status: event.status,
+      // villages are only computed once wind is known (score >= 55 gate), so
+      // null here means "not evaluated", not "none nearby".
+      villagesEvaluated: event.villages !== undefined,
+      nearbyVillages: all.filter(v => v.distanceKm <= proximityKm).map(v => ({ name: displayName(v), rawName: v.name, nameAr: v.name_ar, wilaya: v.wilaya, distanceKm: Number(v.distanceKm.toFixed(2)) })),
+      downwindVillages: all.filter(v => v.relation !== 'upwind' && v.distanceKm > proximityKm).map(v => ({
+        name: displayName(v), rawName: v.name, nameAr: v.name_ar, wilaya: v.wilaya,
+        distanceKm: Number(v.distanceKm.toFixed(2)),
+        bearingFromFireDeg: Number(bearingDeg(event.latitude, event.longitude, v.lat, v.lon).toFixed(1)),
+        bearingFromFireCardinal: cardinalFr(bearingDeg(event.latitude, event.longitude, v.lat, v.lon)),
+        relation: v.relation,
+      })),
+      windUsed: windUsed(event),
+      landUse: event.landUse ?? { context: 'not-evaluated' },
+      wouldHaveAlerted: result.alerts.some(a => a.eventId === event.id),
+    };
+  });
+fs.writeFileSync(eventsPath, JSON.stringify(eventsOut, null, 2) + '\n');
+fs.writeFileSync(metaPath, JSON.stringify({ box: result.box, days: result.days, detectionsPerDay: result.detectionsPerDay, landUseCircuitOpen: result.landUseCircuitOpen }, null, 2) + '\n');
+
+// ---------- c) messages/ ----------
+const firstAlertPerEvent = new Map<string, typeof result.alerts[number]>();
+for (const a of result.alerts) if (!firstAlertPerEvent.has(a.eventId)) firstAlertPerEvent.set(a.eventId, a);
+const focusAlerts = [...firstAlertPerEvent.values()]
+  .map(a => ({ alert: a, event: eventsOut.find(e => e.id === a.eventId)! }))
+  .filter(x => x.event && FOCUS_WILAYAS.includes(x.event.wilaya ?? ''))
+  .sort((a, b) => b.event.maxFrpMw - a.event.maxFrpMw)
+  .slice(0, 5);
+
+focusAlerts.forEach((x, i) => {
+  const name = `${String(i + 1).padStart(2, '0')}-${(x.event.wilaya ?? 'inconnue').replace(/\s+/g, '-')}-frp${Math.round(x.event.maxFrpMw)}.txt`;
+  const header = [
+    `# NON ENVOYÉ — rendu par replay (${new Date().toISOString().slice(0, 10)})`,
+    `# événement ${x.event.id}`,
+    `# première détection ${x.event.firstDetectionAlgiers} (Alger) / ${x.event.firstDetectionUtc}`,
+    `# message rendu tel qu'il serait parti au passage du cron de ${x.alert.renderedAtIso} —`,
+    `#   la première exécution (cadence ${CRON_INTERVAL_MIN} min) ayant vu assez de preuves pour alerter`,
+    `# à cet instant : FRP max ${x.alert.maxFrp.toFixed(1)} MW, score ${x.alert.score}, statut ${x.alert.status}`,
+    '', '',
+  ].join('\n');
+  fs.writeFileSync(path.join(outDir, 'messages', name), header + x.alert.text + '\n');
+});
+
+// ---------- b) report.md ----------
 fs.writeFileSync(path.join(outDir, 'report.md'), renderReport(eventsOut, { box: result.box, days: result.days, detectionsPerDay: result.detectionsPerDay, landUseCircuitOpen: result.landUseCircuitOpen }));
 
 // ---------- d) run-notes.md ----------
@@ -454,7 +525,7 @@ notes.push('');
 notes.push('## Sources FIRMS', '');
 notes.push('| Jour | Source | Lignes |');
 notes.push('|---|---|---:|');
-for (const s of result.sources.filter(s => s.source !== 'MTG_FIR')) notes.push(`| ${s.day} | ${s.source} | ${s.rows}${s.error ? ` (${s.error.slice(0, 80)})` : ''} |`);
+for (const s of result.sources.filter(s => s.source !== 'MTG_FIR' && s.source !== 'SLSTR_FRP')) notes.push(`| ${s.day} | ${s.source} | ${s.rows}${s.error ? ` (${s.error.slice(0, 80)})` : ''} |`);
 notes.push('');
 
 if (withMeteosat) {
@@ -473,6 +544,27 @@ if (withMeteosat) {
   notes.push(`- Événements dont la position est ancrée par Meteosat seul (aucun passage VIIRS) : **${meteosatEvents.length}** sur ${result.events.length}.`);
   notes.push(`- Parmi les **${alertedEvents.length}** événements alertés par ce rejeu : ${meteosatOnlyAlerted.length} alertés par Meteosat seul (règle e), ${withZoneTag} avec le bonus signal 1 (zone habitée), ${withAnomalyTag} avec le bonus signal 2 (anomalie FRP vs historique local), ${withMeteosatPersistTag} avec le bonus signal 3 (persistance Meteosat sur un événement déjà confirmé VIIRS).`);
   notes.push(`  - **Signal 2 (anomalie FRP) : historique quasi vide, comme attendu.** La table \`frp_history\` part vide au début de ce rejeu — un événement ne peut être flagué qu'après au moins ${EARLY_DETECTION_ANOMALY_MIN_SAMPLES} jours distincts d'historique sur la même cellule/heure, ce qu'une fenêtre de quelques jours ne peut produire qu'exceptionnellement (une cellule touchée ${EARLY_DETECTION_ANOMALY_MIN_SAMPLES} jours de suite à la même heure, y compris pendant ce rejeu même). Ce n'est pas un bug : c'est la limite de données déjà documentée pour ce signal (voir lib/early-detection.test.ts) — ${withAnomalyTag === 0 ? 'et effectivement, aucun événement alerté ici n\'a atteint ce seuil.' : `et ${withAnomalyTag} événement(s) l'ont malgré tout atteint.`}`);
+  notes.push('');
+}
+if (withSlstr) {
+  const slstrSources = result.sources.filter(s => s.source === 'SLSTR_FRP');
+  const totalSlstr = Object.values(result.slstrDetectionsPerDay ?? {}).reduce((a, b) => a + b, 0);
+  const slstrOnlyEvents = result.events.filter(e => e.positionSource === 'slstr');
+  const alertedEvents = result.events.filter(e => result.alerts.some(a => a.eventId === e.id));
+  const withSlstrPersistTag = alertedEvents.filter(e => e.evidenceShort.includes('slstr+')).length;
+  const slstrOnlyAlerted = alertedEvents.filter(e => e.positionSource === 'slstr');
+  // Real per-detection FRP promoted a Meteosat-only event's maxFrp (0, no
+  // real reading) to a real MW value — SLSTR's distinct contribution beyond
+  // what Meteosat alone provides, since Meteosat's CAP product carries none.
+  const frpPromotedEvents = result.events.filter(e => e.detections.some(d => d.instrument === 'FCI') && e.detections.some(d => d.instrument === 'SLSTR') && !e.detections.some(d => d.instrument !== 'FCI' && d.instrument !== 'SLSTR'));
+  notes.push('## Sources SLSTR_FRP (Copernicus Sentinel-3, EUMDAC)', '');
+  notes.push('| Jour | Produits/détections en emprise | Erreur |', '|---|---:|---|');
+  for (const s of slstrSources) notes.push(`| ${s.day} | ${s.rows} | ${s.error ? s.error.slice(0, 80) : '—'} |`);
+  notes.push('', `- Détections SLSTR totales sur la fenêtre (déjà filtrées à la classification "feu de végétation") : **${totalSlstr}**.`);
+  notes.push(`- Événements dont la position est ancrée par SLSTR seul (aucun passage VIIRS) : **${slstrOnlyEvents.length}** sur ${result.events.length}.`);
+  notes.push(`- Événements Meteosat-seul dont le FRP réel (nul chez Meteosat) a été promu par une détection SLSTR : **${frpPromotedEvents.length}**.`);
+  notes.push(`- Parmi les **${alertedEvents.length}** événements alertés par ce rejeu : ${slstrOnlyAlerted.length} alertés par SLSTR seul (règle c), ${withSlstrPersistTag} avec le bonus signal 3b (persistance SLSTR sur un événement déjà confirmé VIIRS).`);
+  notes.push(`- **Cadence réelle limitée : 4 produits/jour sur l'Algérie (2 S3A + 2 S3B), contre ~144/jour pour Meteosat.** Sur une fenêtre de quelques jours, la contribution marginale de SLSTR au-delà de VIIRS+Meteosat est donc mécaniquement plus faible — voir metrics.md §8 pour le compte exact, sans l'enjoliver.`);
   notes.push('');
 }
 notes.push('## Différences avec le fonctionnement en direct', '');
@@ -508,3 +600,19 @@ fs.writeFileSync(path.join(outDir, 'run-notes.md'), notes.join('\n'));
 
 console.log(`\n${eventsOut.length} event(s), ${result.alerts.length} alert(s) rendered, ${focusAlerts.length} message file(s).`);
 console.log(`Wrote ${outDir}/events.json, report.md, run-notes.md, messages/`);
+
+if (notify) {
+  const metricsHint = (withMeteosat && withSlstr) ? `${outDir}/metrics.md §8` : `${outDir}/metrics.md`;
+  try {
+    const sent = await defaultAdminNotify(`✅ Rejeu 26 août (${sourcesLabel()}) terminé — voir ${metricsHint}`);
+    console.log(sent ? `Admin notify (success) sent: message_id ${sent.message_id}` : 'Admin notify (success) skipped — ADMIN_TELEGRAM_CHAT_ID not configured');
+  } catch (notifyError) {
+    console.error(`Admin notify FAILED: ${notifyError instanceof Error ? notifyError.message : notifyError}`);
+  }
+}
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`Replay report generation FAILED: ${message}`);
+  await notifyFailure(message);
+  throw error;
+}

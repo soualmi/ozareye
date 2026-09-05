@@ -56,6 +56,46 @@ function rowToDetection(row: RawRow): Detection {
   };
 }
 
+// Replay-only counterpart to fetchSlstrPasses: a bounded [since, until)
+// archive window instead of an ingest_state cursor advancing toward "now".
+// No cursor is read or written — same rationale as lib/meteosat.ts's
+// fetchMeteosatRange, which this mirrors structurally (bounded window,
+// generous timeout/maxBuffer, drops any _cursor line instead of persisting
+// it). SLSTR's real cadence (4/day over Algeria) means far fewer subprocess
+// calls than Meteosat's per-day archive pull, but each one downloads a real
+// NetCDF product rather than a small CAP XML — the same generous
+// timeout/maxBuffer as Meteosat's replay path is kept for that reason.
+export async function fetchSlstrRange(bbox: { west: number; south: number; east: number; north: number }, sinceIso: string, untilIso: string): Promise<SlstrResult> {
+  try {
+    const bboxStr = `${bbox.west},${bbox.south},${bbox.east},${bbox.north}`;
+    const pythonBin = process.env.SLSTR_PYTHON_BIN || 'python3';
+    const result = spawnSync(pythonBin, [SCRIPT_PATH, `--since=${sinceIso}`, `--until=${untilIso}`, `--bbox=${bboxStr}`], { encoding: 'utf8', timeout: 300_000, maxBuffer: 256 * 1024 * 1024 });
+
+    if (result.error) throw result.error;
+    if (result.status !== 0) {
+      const message = (result.stderr || `python exited with status ${result.status}`).trim().slice(0, 300);
+      console.log(`source ${SLSTR_SOURCE} (replay ${sinceIso}..${untilIso}): FAILED (${message})`);
+      return { source: SLSTR_SOURCE, detections: [], ok: false, error: message };
+    }
+
+    const detections: Detection[] = [];
+    for (const line of result.stdout.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const row = JSON.parse(trimmed) as RawRow & { _cursor?: string };
+      if (row._cursor) continue; // no watermark to advance in a bounded replay window
+      detections.push(rowToDetection(row));
+    }
+
+    console.log(`source ${SLSTR_SOURCE} (replay ${sinceIso}..${untilIso}): ${detections.length} detection(s)`);
+    return { source: SLSTR_SOURCE, detections, ok: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.log(`source ${SLSTR_SOURCE} (replay ${sinceIso}..${untilIso}): FAILED (${message})`);
+    return { source: SLSTR_SOURCE, detections: [], ok: false, error: message };
+  }
+}
+
 export async function fetchSlstrPasses(bbox: { west: number; south: number; east: number; north: number }): Promise<SlstrResult> {
   try {
     const since = (await getIngestState(INGEST_STATE_KEY)) ?? new Date(Date.now() - DEFAULT_LOOKBACK_MIN * 60_000).toISOString();

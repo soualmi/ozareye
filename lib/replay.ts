@@ -39,9 +39,10 @@ import path from 'node:path';
 import {
   ALERT_SCORE_THRESHOLD, clusterDetections, EARLY_DETECTION_ANOMALY_MIN_SAMPLES, EARLY_DETECTION_ANOMALY_MULTIPLIER,
   effectiveProximityKm, enrichWeatherHistorical, fetchDetections, gridCell, hasNearbyVillage, isMeteosatDetection, lowerStatus, telegramText,
-  DEFAULT_PERSISTENT_SOURCE_WINDOW_DAYS, MTG_SOURCE, type Detection, type FireEvent,
+  DEFAULT_PERSISTENT_SOURCE_WINDOW_DAYS, MTG_SOURCE, SLSTR_SOURCE, type Detection, type FireEvent,
 } from './fire-monitor';
 import { fetchMeteosatRange } from './meteosat';
+import { fetchSlstrRange } from './slstr';
 import { lookupLandUse } from './landuse';
 import { eventsBetween, frpBaseline, getConfig, initDb, pruneFrpHistory, recordFrpObservation, saveSignal } from './database';
 import { bboxToString } from '../scripts/build-villages';
@@ -55,17 +56,17 @@ export const CRON_INTERVAL_MIN = 20;
 const BUCKET_MS = CRON_INTERVAL_MIN * 60_000;
 
 // Mirrors app/api/monitor/route.ts's ESCALATION_SCORE_DELTA / STATUS_RANK /
-// shouldAlert, meteosat branch (rule e) included. Kept as a copy rather than
-// exported from the route module (a Next.js route file should export only
-// its HTTP handlers) — if the live rule changes, this must change with it.
-// Exported so scripts/replay-metrics.ts reconstructs "would this have
-// alerted, and when" with the exact same rule the fused replay itself used,
-// instead of a third hand-rolled copy.
+// shouldAlert, secondary-source branch (rules e/c, Meteosat and SLSTR)
+// included. Kept as a copy rather than exported from the route module (a
+// Next.js route file should export only its HTTP handlers) — if the live
+// rule changes, this must change with it. Exported so scripts/replay-metrics.ts
+// reconstructs "would this have alerted, and when" with the exact same rule
+// the fused replay itself used, instead of a third hand-rolled copy.
 const ESCALATION_SCORE_DELTA = 15;
 const STATUS_RANK: Record<FireEvent['status'], number> = { observation: 0, corroborated: 1, urgent: 2 };
 
 export function shouldAlert(event: FireEvent, proximityKm: number): boolean {
-  if (event.positionSource === 'meteosat') {
+  if (event.positionSource === 'meteosat' || event.positionSource === 'slstr') {
     if (event.status !== 'corroborated') return false;
     if (!hasNearbyVillage(event, effectiveProximityKm(event, proximityKm))) return false;
     return event.notifiedStatus !== 'corroborated';
@@ -79,7 +80,9 @@ export function shouldAlert(event: FireEvent, proximityKm: number): boolean {
 
 // Détection précoce, signal 2 — mirrors app/api/monitor/route.ts's
 // annotateFrpAnomaly exactly (same copy-not-export rationale as shouldAlert
-// above). Meteosat detections carry no FRP and are skipped, same as live.
+// above). Meteosat detections carry no FRP and are skipped, same as live;
+// SLSTR detections are NOT skipped (isMeteosatDetection only ever excludes
+// Meteosat) — SLSTR carries a real per-detection FRP, same as VIIRS.
 async function annotateFrpAnomaly(detections: Detection[]): Promise<Detection[]> {
   const cutoff = new Date(Date.now() - DEFAULT_PERSISTENT_SOURCE_WINDOW_DAYS * 86_400_000).toISOString().slice(0, 10);
   await pruneFrpHistory(cutoff);
@@ -143,6 +146,10 @@ export type ReplayResult = {
   /** Set only when options.withMeteosat is true — Meteosat detections merged
    *  in per day, alongside the VIIRS rows already counted in sources/. */
   meteosatDetectionsPerDay?: Record<string, number>;
+  /** Set only when options.withSlstr is true — SLSTR detections (already
+   *  filtered to vegetation-fire classification, see scripts/slstr-fetch.py)
+   *  merged in per day, alongside the VIIRS/Meteosat rows already counted. */
+  slstrDetectionsPerDay?: Record<string, number>;
 };
 
 export type ReplayOptions = {
@@ -177,6 +184,13 @@ export type ReplayOptions = {
    *  VIIRS, in the same 20-minute buckets — exactly like the live monitor,
    *  just walked day by day instead of polled every 20 minutes. */
   withMeteosat?: boolean;
+  /** Off by default, same rationale as withMeteosat above — combinable with
+   *  it. When true, fetches Copernicus Sentinel-3 SLSTR FRP archives (EUMDAC,
+   *  collection EO:EUM:DAT:0417, already filtered to vegetation-fire
+   *  classification) for each replayed day and feeds them through the SAME
+   *  clusterDetections()/scoreEvent() path, in the same 20-minute buckets —
+   *  exactly like the live monitor's third source. */
+  withSlstr?: boolean;
 };
 
 // Replay MUST run against its own database file. Called before any DB access:
@@ -225,6 +239,7 @@ export async function runReplay(options: ReplayOptions): Promise<ReplayResult> {
   const sources: ReplaySourceLog[] = [];
   const detectionsPerDay: Record<string, number> = {};
   const meteosatDetectionsPerDay: Record<string, number> = {};
+  const slstrDetectionsPerDay: Record<string, number> = {};
   let weatherLookups = 0, weatherFailures = 0;
   let landUseLookups = 0, landUseUnknown = 0, landUseSkipped = 0, consecutiveLandUseFailures = 0;
   let landUseCircuitOpen = false;
@@ -252,7 +267,19 @@ export async function runReplay(options: ReplayOptions): Promise<ReplayResult> {
       log(`${day}: ${meteosatResult.ok ? `${meteosatResult.detections.length} Meteosat detection(s)` : `Meteosat FAILED (${meteosatResult.error})`}`);
     }
 
-    // One bucket per simulated cron poll, chronological.
+    if (options.withSlstr) {
+      const dayEndMs = dayStartMs + 86_400_000;
+      const slstrResult = await fetchSlstrRange(config.bbox, new Date(dayStartMs).toISOString(), new Date(dayEndMs).toISOString());
+      sources.push({ day, source: SLSTR_SOURCE, rows: slstrResult.ok ? slstrResult.detections.length : 'FAILED', error: slstrResult.error });
+      slstrDetectionsPerDay[day] = slstrResult.detections.length;
+      detections.push(...slstrResult.detections);
+      log(`${day}: ${slstrResult.ok ? `${slstrResult.detections.length} SLSTR detection(s)` : `SLSTR FAILED (${slstrResult.error})`}`);
+    }
+
+    // One bucket per simulated cron poll, chronological. VIIRS, Meteosat and
+    // SLSTR detections are all in the same flat `detections` array by this
+    // point — bucketing by acquiredAt interleaves all three sources
+    // chronologically automatically, no per-source bucketing logic needed.
     const buckets = new Map<number, Detection[]>();
     for (const d of detections) {
       const slot = Math.floor(Date.parse(d.acquiredAt) / BUCKET_MS) * BUCKET_MS;
@@ -269,13 +296,14 @@ export async function runReplay(options: ReplayOptions): Promise<ReplayResult> {
     // the poll being simulated instead, so an event first seen on the 26th is
     // still open for clustering when the 27th's passes arrive.
     const prior = await eventsBetween(new Date(slot - 86_400_000).toISOString(), pollTime.toISOString());
-    // Signal 2 only under --with-meteosat: annotating every bucket costs a
-    // DB round trip per VIIRS detection, and the plain VIIRS-only command
-    // must keep reproducing the original run byte for byte. Rules a-e
-    // (clusterDetections) and signals 1/3 (scoreEvent) already fire
-    // unconditionally either way — they only need Meteosat rows to be present
-    // in bucketDetections, not a flag.
-    const scoredDetections = options.withMeteosat ? await annotateFrpAnomaly(bucketDetections) : bucketDetections;
+    // Signal 2 only under --with-meteosat/--with-slstr: annotating every
+    // bucket costs a DB round trip per VIIRS (and, with SLSTR on, per SLSTR)
+    // detection, and the plain VIIRS-only command must keep reproducing the
+    // original run byte for byte. Rules a-e (clusterDetections) and signals
+    // 1/3/3b (scoreEvent) already fire unconditionally either way — they
+    // only need Meteosat/SLSTR rows to be present in bucketDetections, not a
+    // flag.
+    const scoredDetections = (options.withMeteosat || options.withSlstr) ? await annotateFrpAnomaly(bucketDetections) : bucketDetections;
     const clustered = clusterDetections(scoredDetections, prior, config.frpThresholdMw);
     // Only events this poll actually touched get re-scored, enriched and saved;
     // the rest are untouched rows already in the replay database.
@@ -288,11 +316,13 @@ export async function runReplay(options: ReplayOptions): Promise<ReplayResult> {
     for (const raw of events) {
       let event = raw;
       // Meteosat-only events rarely cross score 55 on their own (no real FRP/
-      // confidence), but rule (e)'s alert gate needs the same wind/village
-      // enrichment as any VIIRS event once it clears 'corroborated' — mirrors
-      // app/api/monitor/route.ts's meteosatEligible check exactly.
-      const meteosatEligible = raw.positionSource === 'meteosat' && raw.status === 'corroborated';
-      if (raw.score >= 55 || meteosatEligible) {
+      // confidence); an SLSTR-only event CAN, but is included here too for
+      // the same reason rule (c) caps its status the same way — either way
+      // rule (e)/(c)'s alert gate needs the same wind/village enrichment as
+      // any VIIRS event once it clears 'corroborated' — mirrors
+      // app/api/monitor/route.ts's secondaryEligible check exactly.
+      const secondaryEligible = (raw.positionSource === 'meteosat' || raw.positionSource === 'slstr') && raw.status === 'corroborated';
+      if (raw.score >= 55 || secondaryEligible) {
         weatherLookups++;
         for (let attempt = 0; attempt <= weatherRetries; attempt++) {
           if (weatherDelayMs > 0) await sleep(weatherDelayMs);
@@ -351,10 +381,13 @@ export async function runReplay(options: ReplayOptions): Promise<ReplayResult> {
   // A fused run can cluster into far more distinct events nationwide than
   // VIIRS alone (Meteosat's whole-disk, 10-minute cadence sees far more
   // persistent heat sources) — a higher ceiling than the original replay's
-  // fixed 5,000 costs nothing when the count stays low.
-  const events = await eventsBetween(`${first}T00:00:00.000Z`, `${last}T23:59:59.999Z`, options.withMeteosat ? 50_000 : 5_000);
+  // fixed 5,000 costs nothing when the count stays low. SLSTR's real cadence
+  // (4/day over Algeria) adds far fewer events than Meteosat does, but shares
+  // the same higher ceiling rather than a third magic number.
+  const events = await eventsBetween(`${first}T00:00:00.000Z`, `${last}T23:59:59.999Z`, (options.withMeteosat || options.withSlstr) ? 50_000 : 5_000);
   return {
     days, box, sources, events, alerts, landUseLookups, landUseUnknown, landUseCircuitOpen, landUseSkipped, weatherLookups, weatherFailures, detectionsPerDay,
     ...(options.withMeteosat ? { meteosatDetectionsPerDay } : {}),
+    ...(options.withSlstr ? { slstrDetectionsPerDay } : {}),
   };
 }

@@ -89,6 +89,7 @@ def load_env_local():
 def parse_args():
     parser = argparse.ArgumentParser(description='Fetch new Copernicus Sentinel-3 SLSTR Level 2 FRP detections since a timestamp.')
     parser.add_argument('--since', required=True, help='ISO 8601 UTC timestamp; only products sensed strictly after this are fetched')
+    parser.add_argument('--until', help='ISO 8601 UTC timestamp; only products sensed at or before this are fetched. Omitted in live use (fetch up to now); set by replay for a bounded archive window.')
     parser.add_argument('--bbox', required=True, help='west,south,east,north (degrees)')
     return parser.parse_args()
 
@@ -164,6 +165,7 @@ def parse_frp_detections(nc_bytes, bbox, satellite):
 def main():
     args = parse_args()
     since = parse_since(args.since)
+    until = parse_since(args.until) if args.until else None
     bbox = parse_bbox(args.bbox)
 
     env = load_env_local()
@@ -183,7 +185,10 @@ def main():
     # products are real swaths — this bbox search actually narrows which
     # products come back, in addition to the per-detection bbox filter below
     # (a product's swath can extend past the target area).
-    results = collection.search(bbox=f'{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}', dtstart=since)
+    search_kwargs = {'bbox': f'{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}', 'dtstart': since}
+    if until is not None:
+        search_kwargs['dtend'] = until
+    results = collection.search(**search_kwargs)
     products = sorted(results, key=lambda p: p.sensing_start)
 
     latest_processed = None
@@ -192,6 +197,8 @@ def main():
         sensing_start = product.sensing_start.replace(tzinfo=datetime.timezone.utc)
         if sensing_start <= since:
             continue  # search's dtstart can be inclusive at the boundary — never re-emit the same product twice
+        if until is not None and sensing_start > until:
+            continue  # dtend can be inclusive too — replay needs a hard upper bound to keep its day buckets non-overlapping
         entry = find_frp_entry(product)
         if entry is None:
             print(f'slstr-fetch: no {FRP_ENTRY_SUFFIX} entry in product {product}', file=sys.stderr)

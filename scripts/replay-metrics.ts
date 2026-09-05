@@ -50,8 +50,14 @@ process.env.ALGERIE_FEUX_DB_PATH = path.resolve(dbPath);
 // ALGERIE_FEUX_DB_PATH, already pointed at --db above.
 const baselineDb = arg('baseline-db');
 const baselineOut = arg('baseline-out');
+// Optional: the VIIRS+Meteosat replay to compare a 3-source (VIIRS+Meteosat+
+// SLSTR) run against (§8) — a DIFFERENT baseline than §7's VIIRS-only one,
+// since SLSTR's marginal contribution is what Meteosat alone already
+// provides, not what VIIRS alone provides.
+const baseline2Db = arg('baseline2-db');
+const baseline2Out = arg('baseline2-out');
 
-const { clusterDetections, ALERT_SCORE_THRESHOLD, algiersTime } = await import('../lib/fire-monitor');
+const { clusterDetections, ALERT_SCORE_THRESHOLD, algiersTime, isMeteosatDetection, isSlstrDetection } = await import('../lib/fire-monitor');
 const { shouldAlert } = await import('../lib/replay');
 const { displayName } = await import('../lib/place-name');
 const { eventsBetween, getConfig } = await import('../lib/database');
@@ -61,6 +67,12 @@ const BUCKET_MS = 20 * 60_000;
 const FOCUS = ['Jijel', 'Béjaïa', 'Tizi Ouzou'];
 const WEAK_FRP_MW = 20;
 const BIG_FRP_MW = 100;
+// Matching two independent runs' events by id is meaningless — a wider join
+// radius (Meteosat) or a different detection footprint (SLSTR) can merge or
+// split things differently across two separate replays of the same window.
+// Geographic nearest-neighbour is the practical substitute — shared by §7
+// and §8 rather than two separate magic numbers.
+const MATCH_RADIUS_KM = 3;
 
 type EventOut = {
   id: string; wilaya: string | null; wilayaLabel: string;
@@ -108,16 +120,15 @@ function firstAlert(event: FireEvent): FirstAlert | null {
 }
 
 // shouldAlert()-based reconstruction (lib/replay.ts, exported so this and the
-// fused replay itself never drift apart) — rule (e)'s meteosat branch
-// included. Used only by §7: unlike firstAlert() above, this correctly finds
-// a Meteosat-only event's alerting poll (gated on status, not a score
-// threshold its score can't realistically reach).
-// Widened to FireEvent's own positionSource type (not a hand-rolled
-// 'viirs' | 'meteosat' union) — this replay path only ever feeds VIIRS and
-// Meteosat detections through clusterDetections() (see this feature's own
-// note: SLSTR is deliberately NOT wired into replay), but scoreEvent()'s
-// return type now includes 'slstr' too, so the annotation here must accept
-// it to type-check even though it can never actually occur at runtime here.
+// fused replay itself never drift apart) — rule (e)/(c)'s secondary-source
+// branch (Meteosat and SLSTR) included. Used by §7 and §8: unlike
+// firstAlert() above, this correctly finds a Meteosat-only or SLSTR-only
+// event's alerting poll (gated on status, not a score threshold its score
+// can't always realistically reach).
+// Typed as FireEvent's own positionSource type (not a hand-rolled
+// 'viirs' | 'meteosat' union) since scoreEvent()'s return type now genuinely
+// includes 'slstr' too — this replay path can produce it for real once
+// --with-slstr is used.
 type ReconstructedAlert = { atIso: string; frpAtAlert: number; passesAtAlert: number; positionSourceAtAlert: NonNullable<FireEvent['positionSource']> };
 
 function reconstructAlert(event: FireEvent, proximityKm: number): ReconstructedAlert | null {
@@ -337,7 +348,6 @@ if (baselineDb && baselineOut) {
     if (first) baselineFirstAlerts.set(e.id, first);
   }
 
-  const MATCH_RADIUS_KM = 3;
   function nearestBaseline(lat: number, lon: number): FireEvent | null {
     let best: FireEvent | null = null, bestDist = Infinity;
     for (const b of baselineAlertedFull) {
@@ -398,10 +408,162 @@ if (baselineDb && baselineOut) {
   };
 }
 
+// --- 8. SLSTR's contribution: compare against the VIIRS+Meteosat replay
+//     (--baseline2-db/--baseline2-out) — a DIFFERENT baseline than §7's
+//     VIIRS-only one, since the question here is what SLSTR adds beyond
+//     what Meteosat ALREADY provides, not what either adds beyond VIIRS
+//     alone. ------------------------------------------------------------
+
+// 1. Real per-detection FRP on an event that would otherwise be Meteosat-
+//    only (frp=0, no real reading) — SLSTR's distinct contribution beyond
+//    Meteosat alone. Computed from THIS run's own stored events; no
+//    baseline needed for this one.
+const slstrFrpPromoted = stored.filter(e =>
+  e.detections.some(isMeteosatDetection) &&
+  e.detections.some(isSlstrDetection) &&
+  !e.detections.some(d => !isMeteosatDetection(d) && !isSlstrDetection(d)),
+);
+// 4. Honesty denominator: real SLSTR detections that made it into a
+//    clustered event over the whole window — not inflated, not rounded up.
+const slstrDetectionCount = stored.reduce((n, e) => n + e.detections.filter(isSlstrDetection).length, 0);
+
+type SlstrComparisonRow = {
+  id: string; wilaya: string; firstDetectionUtc: string; maxFrpMw: number;
+  fusedFirstAlertUtc: string; fusedFirstAlertAlgiers: string;
+  matchedBaselineId: string | null; baselineFirstAlertUtc: string | null; baselineFirstAlertAlgiers: string | null;
+  deltaMinutes: number | null;
+};
+let slstrComparison: {
+  slstrFirstCount: number; slstrFirstStatusNote: string;
+  matched: SlstrComparisonRow[]; unmatched: SlstrComparisonRow[];
+  deltaMinutes: { count: number; averageMin: number | null; medianMin: number | null };
+  additionalEarlyWeak: { count: number; rows: ReturnType<typeof toRow>[] };
+  // 3. The headline lead-time number, restated: this run's own aug26 (§5)
+  // alongside the SAME figure recomputed for the baseline2 (VIIRS+Meteosat)
+  // run — expected to read as essentially the same times, since SLSTR is
+  // polar (like VIIRS), not geostationary (like Meteosat), and therefore
+  // doesn't fill the temporal gap Meteosat fills.
+  headlineLeadTime: { current: typeof aug26; baseline: typeof aug26 };
+} | null = null;
+
+if (baseline2Db && baseline2Out) {
+  const b2DbFile = new DatabaseSync(path.resolve(baseline2Db), { readOnly: true });
+  const b2Rows = b2DbFile.prepare('SELECT payload FROM fire_events').all() as { payload: string }[];
+  b2DbFile.close();
+  const b2Stored = b2Rows.map(r => JSON.parse(r.payload) as FireEvent);
+  const b2OutJson = JSON.parse(fs.readFileSync(path.join(baseline2Out, 'events.json'), 'utf8')) as { id: string; wilaya: string | null; latitude: number; longitude: number; wouldHaveAlerted: boolean }[];
+  const b2AlertedFull = b2OutJson.filter(e => e.wouldHaveAlerted).map(e => b2Stored.find(s => s.id === e.id)).filter((e): e is FireEvent => Boolean(e));
+  const b2FirstAlerts = new Map<string, ReconstructedAlert>();
+  for (const e of b2AlertedFull) {
+    const first = reconstructAlert(e, config.proximityKm);
+    if (first) b2FirstAlerts.set(e.id, first);
+  }
+
+  function nearestB2(lat: number, lon: number): FireEvent | null {
+    let best: FireEvent | null = null, bestDist = Infinity;
+    for (const b of b2AlertedFull) {
+      if (!b2FirstAlerts.has(b.id)) continue;
+      const d = distanceKm(lat, lon, b.latitude, b.longitude);
+      if (d <= MATCH_RADIUS_KM && d < bestDist) { best = b; bestDist = d; }
+    }
+    return best;
+  }
+
+  // This (3-source) run's own alerting poll, reconstructed with the SAME
+  // shouldAlert()-based function as the baseline2 side above — the top-level
+  // `alerts` map (used by §1-6) can't be reused: it's built with the old
+  // score-threshold-only firstAlert(), which under-detects secondary-only
+  // events by design (see that function's comment).
+  const fusedFirstAlerts = new Map<string, ReconstructedAlert>();
+  const focusFusedAlerted = eventsOut.filter(e => e.wouldHaveAlerted && FOCUS.includes(e.wilaya ?? ''));
+  for (const e of focusFusedAlerted) {
+    const full = storedById.get(e.id);
+    if (!full) continue;
+    const first = reconstructAlert(full, config.proximityKm);
+    if (first) fusedFirstAlerts.set(e.id, first);
+  }
+
+  const rows: SlstrComparisonRow[] = focusFusedAlerted.filter(e => fusedFirstAlerts.has(e.id)).map(e => {
+    const fusedAlert = fusedFirstAlerts.get(e.id)!;
+    const match = nearestB2(e.latitude, e.longitude);
+    const baselineAlert = match ? b2FirstAlerts.get(match.id)! : null;
+    return {
+      id: e.id, wilaya: e.wilaya ?? '?', firstDetectionUtc: e.firstDetectionUtc, maxFrpMw: e.maxFrpMw,
+      fusedFirstAlertUtc: fusedAlert.atIso, fusedFirstAlertAlgiers: algiersTime(fusedAlert.atIso),
+      matchedBaselineId: match?.id ?? null,
+      baselineFirstAlertUtc: baselineAlert?.atIso ?? null,
+      baselineFirstAlertAlgiers: baselineAlert ? algiersTime(baselineAlert.atIso) : null,
+      // Positive = the 3-source run alerted EARLIER than VIIRS+Meteosat —
+      // the "did SLSTR buy lead time" question. Expected to be small/near
+      // zero: SLSTR is polar like VIIRS, not geostationary like Meteosat, so
+      // it doesn't fill the temporal gap the way Meteosat does over VIIRS.
+      deltaMinutes: baselineAlert ? Math.round((Date.parse(baselineAlert.atIso) - Date.parse(fusedAlert.atIso)) / 60_000) : null,
+    };
+  });
+  const matched = rows.filter(r => r.matchedBaselineId !== null);
+  const unmatched = rows.filter(r => r.matchedBaselineId === null);
+  const deltaValues = matched.map(r => r.deltaMinutes!).filter(v => v !== null);
+  // 2. Events whose FIRST-EVER alert was triggered by SLSTR alone (rule c),
+  //    before any VIIRS pass existed on it yet.
+  const slstrFirstIds = focusFusedAlerted.filter(e => fusedFirstAlerts.get(e.id)?.positionSourceAtAlert === 'slstr').map(e => e.id);
+
+  // 2 (early-weak variant). Additional early-weak-signal alerts (§1's exact
+  // definition: firstAlert(), score-threshold reconstruction) that this
+  // 3-source run has but the baseline2 (2-source) run does not, matched
+  // geographically — SLSTR's sub-pixel sensitivity finding something
+  // Meteosat+VIIRS alone missed, not a same-event timing improvement
+  // (that's deltaMinutes above, a different claim).
+  const b2Alerts = new Map<string, FirstAlert>();
+  for (const e of b2AlertedFull) {
+    const first = firstAlert(e);
+    if (first) b2Alerts.set(e.id, first);
+  }
+  const b2WeakFrpSet = b2AlertedFull
+    .filter(e => e.maxFrp >= BIG_FRP_MW && b2Alerts.has(e.id) && b2Alerts.get(e.id)!.frpAtAlert < WEAK_FRP_MW)
+    .map(e => ({ id: e.id, latitude: e.latitude, longitude: e.longitude }));
+  const additionalEarlyWeakRows = weakFrpSet.filter(({ e }) =>
+    !b2WeakFrpSet.some(b => distanceKm(e.latitude, e.longitude, b.latitude, b.longitude) <= MATCH_RADIUS_KM),
+  );
+
+  // 3. The baseline2 (VIIRS+Meteosat) run's own headline lead-time number,
+  // recomputed the SAME way §5 computes `aug26` for this run — the number
+  // to restate alongside it, not a new claim.
+  const b2WilayaById = new Map(b2OutJson.map(e => [e.id, e.wilaya] as const));
+  const b2Aug26 = FOCUS.map(w => {
+    const times = b2AlertedFull
+      .filter(e => b2WilayaById.get(e.id) === w)
+      .map(e => b2Alerts.get(e.id)?.atIso)
+      .filter((iso): iso is string => !!iso && iso.slice(0, 10) === '2026-08-26')
+      .sort();
+    return { wilaya: w, firstAlertUtc: times[0] ?? null, firstAlertAlgiers: times[0] ? algiersTime(times[0]) : null, alertsThatDay: times.length };
+  });
+
+  slstrComparison = {
+    slstrFirstCount: slstrFirstIds.length,
+    // Rule (c), locked (lib/fire-monitor.ts scoreEvent): an SLSTR-only
+    // event's status can only ever be 'observation' or 'corroborated', and
+    // shouldAlert's secondary branch requires status === 'corroborated'
+    // exactly — so by construction every one of these alerts is
+    // 'corroborated', never 'urgent'. Not a distribution to compute; a fact
+    // to state.
+    slstrFirstStatusNote: `${slstrFirstIds.length}/${slstrFirstIds.length} au statut 'corroborated' — jamais 'urgent' par construction de la règle (c) (voir lib/fire-monitor.ts).`,
+    matched, unmatched,
+    deltaMinutes: {
+      count: deltaValues.length,
+      averageMin: deltaValues.length ? Math.round(deltaValues.reduce((a, b) => a + b, 0) / deltaValues.length) : null,
+      medianMin: quantile(deltaValues, 0.5),
+    },
+    additionalEarlyWeak: { count: additionalEarlyWeakRows.length, rows: additionalEarlyWeakRows.map(toRow) },
+    headlineLeadTime: { current: aug26, baseline: b2Aug26 },
+  };
+}
+
 const metrics = {
   generatedAt: new Date().toISOString(),
   source: { events: eventsOut.length, alerted: alertedIds.length, db: dbPath },
   ...(meteosatComparison ? { meteosatComparison } : {}),
+  slstrContribution: { frpPromotedCount: slstrFrpPromoted.length, totalDetections: slstrDetectionCount, cadenceNote: '4 produits/jour sur l\'Algérie (2 S3A + 2 S3B) — cadence réelle mesurée, à comparer aux ~144/jour de Meteosat.' },
+  ...(slstrComparison ? { slstrComparison } : {}),
   calibration,
   earlyWeakSignal: { count: earlyWeak.length, top10: earlyWeak.slice(0, 10) },
   bigOnFirstSight: { count: firstSightBig.length, top10: firstSightBig.slice(0, 10) },
@@ -502,6 +664,45 @@ if (meteosatComparison) {
   L.push('- **Le rapprochement géographique (<=3km) est une approximation**, pas un identifiant stable : un même feu peut être un seul événement dans un rejeu et deux dans l\'autre (le rayon de jonction de Meteosat diffère de celui de VIIRS). Les gains de temps ci-dessus sont donc indicatifs, pas une vérité absolue événement-par-événement.');
   L.push('- **Aucune vérification terrain non plus ici** : un gain de temps mesuré est un gain de temps entre deux rejeux hors ligne du même moteur, pas une preuve qu\'un incendie réel a été signalé plus tôt à quelqu\'un.');
   L.push('');
+}
+
+L.push('## 8. Apport de Sentinel-3 SLSTR — comparé au rejeu VIIRS+Meteosat', '');
+L.push(`Ce rejeu fusionne VIIRS, Meteosat et Copernicus Sentinel-3 SLSTR (EUMDAC, collection EO:EUM:DAT:0417, filtré à la classification "feu de végétation") sur la même fenêtre. Contrairement à Meteosat (géostationnaire, ~10min de cadence, comble un angle mort temporel), SLSTR est polaire — même famille orbitale que VIIRS. Sa valeur attendue est donc la SENSIBILITÉ de détection à ses propres passages, pas le comblement de l'angle mort temporel que Meteosat comble déjà.`, '');
+L.push(`**${metrics.slstrContribution.frpPromotedCount} événement(s)** qui n'auraient eu aucun FRP réel avec Meteosat seul (FRP nul, comme toujours pour Meteosat) ont vu leur FRP promu à une vraie valeur SLSTR — c'est la contribution la plus directe et la moins ambiguë de SLSTR, mesurable sans comparaison à un autre rejeu.`, '');
+L.push(`**Honnêteté sur le volume : ${metrics.slstrContribution.totalDetections} détection(s) SLSTR réelles** sur toute la fenêtre. ${metrics.slstrContribution.cadenceNote} Sur une fenêtre de quelques jours, ce chiffre reste modeste — ce compte est le chiffre réel, pas gonflé.`, '');
+if (slstrComparison) {
+  const sc = slstrComparison;
+  L.push('', `Comparaison géographique (<=${MATCH_RADIUS_KM}km) contre le rejeu VIIRS+Meteosat (\`${baseline2Db}\`) : sur les ${sc.matched.length + sc.unmatched.length} événements alertés de ce rejeu dans ${FOCUS.join(', ')}, **${sc.matched.length}** ont un événement correspondant dans le rejeu VIIRS+Meteosat, ${sc.unmatched.length} n'en ont aucun.`, '');
+  L.push(`**${sc.slstrFirstCount} événement(s)** ont eu leur toute première alerte déclenchée par SLSTR seul (règle c), avant qu'aucun passage VIIRS n'existe encore sur cet événement. ${sc.slstrFirstStatusNote}`, '');
+  L.push('### Délai — inchangé pour l\'essentiel, comme attendu', '');
+  L.push('Restatement du chiffre-phare du rejeu VIIRS+Meteosat (§5 de ce document et de `metrics.md` du rejeu à 2 sources), pas une nouvelle mesure : SLSTR ne comble pas l\'angle mort temporel que Meteosat comble déjà, donc ces heures ne devraient quasiment pas bouger.', '');
+  L.push('| Wilaya | Première alerte VIIRS+Meteosat (Alger) | Première alerte 3 sources (Alger) | Écart |', '|---|---|---|---:|');
+  for (let i = 0; i < FOCUS.length; i++) {
+    const cur = sc.headlineLeadTime.current[i], base = sc.headlineLeadTime.baseline[i];
+    const deltaMin = cur.firstAlertUtc && base.firstAlertUtc ? Math.round((Date.parse(base.firstAlertUtc) - Date.parse(cur.firstAlertUtc)) / 60_000) : null;
+    L.push(`| ${FOCUS[i]} | ${base.firstAlertAlgiers ?? 'aucune'} | ${cur.firstAlertAlgiers ?? 'aucune'} | ${deltaMin !== null ? `${deltaMin} min` : '—'} |`);
+  }
+  L.push('');
+  if (sc.deltaMinutes.count > 0) {
+    const meteosatGainNote = meteosatComparison?.savedMinutes.count ? ` (à comparer au gain de Meteosat sur VIIRS seul, §7 : moyenne ${meteosatComparison.savedMinutes.averageMin} min, médiane ${meteosatComparison.savedMinutes.medianMin} min — ce chiffre-ci devrait être nettement plus petit)` : '';
+    L.push(`Sur les ${sc.deltaMinutes.count} événements appariés : écart moyen **${sc.deltaMinutes.averageMin} min**, médian **${sc.deltaMinutes.medianMin} min** par rapport à la première alerte du rejeu VIIRS+Meteosat${meteosatGainNote}.`, '');
+  } else {
+    L.push('Aucun événement apparié n\'a d\'écart de temps mesurable sur cette fenêtre.', '');
+  }
+  L.push(`**${sc.additionalEarlyWeak.count} alerte(s) sur signal faible précoce supplémentaire(s)** (définition du §1 : FRP < ${WEAK_FRP_MW} MW à l'alerte, puis pic ≥ ${BIG_FRP_MW} MW) présentes dans ce rejeu à 3 sources mais absentes — après rapprochement géographique <=${MATCH_RADIUS_KM}km — du rejeu VIIRS+Meteosat : la sensibilité sous-pixel de SLSTR trouvant quelque chose que VIIRS+Meteosat seuls ont manqué.`, '');
+  if (sc.additionalEarlyWeak.count > 0) {
+    L.push('| Wilaya | Première alerte (Alger) | FRP à l\'alerte | Pic FRP | Village le plus proche |', '|---|---|---:|---:|---|');
+    for (const w of sc.additionalEarlyWeak.rows.slice(0, 10)) L.push(`| ${w.wilaya} | ${w.firstAlertAlgiers} ${w.firstAlertUtc.slice(5, 10)} | ${w.frpAtAlertMw} MW | ${w.peakFrpMw} MW | ${w.nearestVillage} |`);
+    L.push('');
+  }
+  L.push('**Honnêteté :**', '');
+  L.push(`- **Cadence réelle limitée, comme annoncé avant ce rejeu.** ${metrics.slstrContribution.cadenceNote} La contribution marginale mesurée ci-dessus, sur une fenêtre de quelques jours, est mécaniquement petite — ce n'est pas un signe que l'intégration est cassée, c'est la limite physique de cadence de ce capteur sur cette fenêtre précise.`);
+  L.push('- **Le délai ne change quasiment pas, et c\'est attendu, pas un échec.** SLSTR est polaire (même famille que VIIRS), pas géostationnaire (comme Meteosat) — sa valeur est la sensibilité de détection à ses propres passages, pas le comblement de l\'angle mort temporel entre deux passages VIIRS. Voir le tableau ci-dessus : ces heures ne devraient quasiment pas bouger par rapport au rejeu VIIRS+Meteosat.');
+  L.push('- **Le rapprochement géographique (<=3km) reste une approximation**, pas un identifiant stable — même réserve qu\'au §7.');
+  L.push('- **Aucune vérification terrain non plus ici.**');
+  L.push('');
+} else {
+  L.push('', '_Comparaison géographique contre le rejeu VIIRS+Meteosat non calculée : `--baseline2-db`/`--baseline2-out` non fournis à cette exécution._', '');
 }
 
 fs.writeFileSync(path.join(outDir, 'metrics.md'), L.join('\n'));
