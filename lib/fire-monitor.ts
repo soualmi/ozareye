@@ -20,6 +20,7 @@ import { cardinalFr, classifyExposure, type WindRelation } from './wind';
 import { isolatedDisplayName, stripTifinagh } from './place-name';
 import { wilayaAt } from './wilaya';
 import { nearestFireStation, nearestStationLine } from './firestation';
+import type { FireLikelihoodResult } from './firesignature';
 
 // Real point-in-polygon wilaya attribution for a fire centroid — used both for
 // message display and for per-wilaya routing (Part C). Replaces the earlier
@@ -85,6 +86,12 @@ export type FireEvent = {
   // as good as OSM's own tagging in Algeria, not a satellite-derived
   // vegetation survey — see lib/forestcover.ts's own module comment.
   inForest?: boolean;
+  // Advisory "does this look like a real fire we've seen before" context —
+  // see lib/firesignature.ts's own module comment for the two-tier
+  // (burn-scar-confirmed vs global-pattern) honesty structure. Purely
+  // additive, same as landUse/inForest above: never read by
+  // scoreEvent/clusterDetections/shouldAlert, never a corroboration bypass.
+  fireLikelihood?: FireLikelihoodResult;
   notifiedAt?: string; notifiedScore?: number; notifiedStatus?: FireEvent['status'];
   // Tier 1 early-warning notice (opt-in, ENABLE_EARLY_SIGNAL_NOTICE) — set
   // once the lightweight "1 seul passage, non confirmé" notice has been

@@ -25,6 +25,7 @@ import {
 } from './fire-monitor';
 import { lookupLandUse } from './landuse';
 import { isInForest } from './forestcover';
+import { scoreFireLikelihood } from './firesignature';
 import { distinctDayCount, frpBaseline, pruneFrpHistory, pruneHotspotHistory, recordDetectionDay, recordFrpObservation } from './database';
 
 function windowCutoffDay(): string {
@@ -146,4 +147,18 @@ export async function applyLandUse(event: FireEvent): Promise<FireEvent> {
 // above, so this runs unconditionally for every clustered event.
 export function applyForestCover(event: FireEvent): FireEvent {
   return { ...event, inForest: isInForest(event.latitude, event.longitude) };
+}
+
+// Advisory fire-signature likelihood (lib/firesignature.ts): compares this
+// event's FIRST real-FRP detection (Meteosat excluded — its FRP is always
+// the 0 placeholder, not a real reading, see lib/fire-monitor.ts) against
+// the two-tier reference set. Purely additive, same as applyForestCover
+// above — never touches status/score, never a corroboration bypass. An
+// event with no real-FRP detection at all yet (Meteosat-only) is left
+// untouched: there is nothing honest to compare.
+export function applyFireLikelihood(event: FireEvent): FireEvent {
+  const realDets = event.detections.filter(d => !isMeteosatDetection(d)).sort((a, b) => a.acquiredAt.localeCompare(b.acquiredAt));
+  if (realDets.length === 0) return event;
+  const first = realDets[0];
+  return { ...event, fireLikelihood: scoreFireLikelihood({ firstFrpMw: first.frp, firstConfidence: first.confidence }) };
 }

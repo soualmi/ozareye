@@ -84,6 +84,16 @@ export default function EventDetail({ event, onBack }: { event: DashboardEvent; 
           that anyone has checked it on the ground. */}
       <p className="mb-3 rounded-lg border border-white/10 bg-[#07130f] px-3 py-2 text-xs text-[#c9dbd3]">{event.sourceStatusLine}</p>
 
+      {/* Advisory fire-signature likelihood (lib/firesignature.ts) — the
+          caveat travels WITH the line, smaller but never hidden, so the
+          real sample size/tier basis is never separated from the claim. */}
+      {event.fireLikelihoodLine && (
+        <p className="mb-3 rounded-lg border border-white/10 bg-[#07130f] px-3 py-2 text-xs text-[#c9dbd3]">
+          {event.fireLikelihoodLine}
+          {event.fireLikelihoodCaveat && <span className="mt-1 block text-[11px] text-[#8da79d]">{event.fireLikelihoodCaveat}</span>}
+        </p>
+      )}
+
       {/* 2. One paragraph */}
       <p className="mb-4 leading-relaxed text-[#c9dbd3]">
         {event.landUseContext === 'industrial'

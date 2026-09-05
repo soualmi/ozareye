@@ -10,8 +10,10 @@ import { EARLY_DETECTION_ANOMALY_MIN_SAMPLES, gridCell, type Detection, type Fir
 process.env.ALGERIE_FEUX_DB_PATH = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'algerie-feux-monitor-pipeline-test-')), 'signals.db');
 delete process.env.ALGERIE_FEUX_INDUSTRIAL_INDEX_PATH; // real shipped data/industrial-sites.json
 delete process.env.ALGERIE_FEUX_FOREST_INDEX_PATH; // real shipped data/forest-areas.json
+delete process.env.ALGERIE_FEUX_BURNSCAR_REFERENCE_PATH; // real shipped data/burnscar-confirmed-reference.json
+delete process.env.ALGERIE_FEUX_GLOBAL_FIRE_REFERENCE_PATH; // real shipped data/global-fire-reference.json
 const { initDb, recordDetectionDay, recordFrpObservation, frpBaseline } = await import('./database');
-const { prepareDetections, applyLandUse, applyForestCover } = await import('./monitor-pipeline');
+const { prepareDetections, applyLandUse, applyForestCover, applyFireLikelihood } = await import('./monitor-pipeline');
 await initDb();
 
 const PERSISTENT_SOURCE_DAYS = 10;
@@ -136,4 +138,23 @@ const NO_FOREST_SITE = { latitude: 35.6971, longitude: -0.6337 };
 test('applyForestCover: a non-forest event resolves inForest false', () => {
   const out = applyForestCover(event({ ...NO_FOREST_SITE, detections: [viirsDet({ ...NO_FOREST_SITE })] }));
   assert.equal(out.inForest, false);
+});
+
+// --- applyFireLikelihood: advisory only, never touches status/score --------
+
+test('applyFireLikelihood: a real burn-scar-confirmed FRP/confidence shape matches that tier, status/score untouched', () => {
+  // 2190.39 MW / confidence '100' is the REAL firstFrpMw/firstConfidence of
+  // one of the 7 genuinely re-verified burn-scar-confirmed reference
+  // examples (data/burnscar-confirmed-reference.json) — an exact match, not
+  // a made-up number.
+  const out = applyFireLikelihood(event({ status: 'corroborated', score: 74, detections: [viirsDet({ frp: 2190.39, confidence: '100' })] }));
+  assert.equal(out.fireLikelihood?.matchedTier, 'burnscar_confirmed');
+  assert.equal(out.status, 'corroborated', 'purely additive — never touches status');
+  assert.equal(out.score, 74, 'purely additive — never touches score');
+});
+
+test('applyFireLikelihood: a Meteosat-only event (no real-FRP detection yet) is left untouched — nothing honest to compare', () => {
+  const meteosatOnlyDet: Detection = { latitude: 36.5, longitude: 5.5, acquiredAt: todayAt(10), satellite: 'MTI1', instrument: 'FCI', confidence: '', frp: 0 };
+  const out = applyFireLikelihood(event({ detections: [meteosatOnlyDet] }));
+  assert.equal(out.fireLikelihood, undefined);
 });

@@ -50,6 +50,12 @@ export type DashboardEvent = {
   // `false` means the local index was checked and found no match (or the
   // index itself is missing — same fail-soft "false" either way).
   inForest?: boolean;
+  // Advisory fire-signature likelihood (lib/firesignature.ts) — a
+  // plain-language label + score, and its own honesty caveat (real
+  // current reference-set size and tier breakdown). Absent when the
+  // event has no real-FRP detection yet to compare (Meteosat-only).
+  fireLikelihoodLine?: string;
+  fireLikelihoodCaveat?: string;
   title: string;
   industrialLeadLine?: string;
   // Meteosat/SLSTR fusion: 'meteosat' means the position is a

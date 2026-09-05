@@ -26,6 +26,7 @@ import {
 import { satelliteName } from './satellite-names';
 import { displayName, withDisplayName } from './place-name';
 import { nearestFireStation, nearestStationLine } from './firestation';
+import type { FireLikelihoodResult } from './firesignature';
 
 // frpThresholdMw/proximityKm default to the engine's own defaults but should
 // normally be passed in from the current config (see /api/dashboard/events
@@ -42,6 +43,17 @@ export function sourceStatusLine(passCount: number): string {
   return passCount >= 2
     ? `Signal thermique répété — corroboré par ${passCount} passages satellites, non confirmé au sol`
     : 'Passage satellite unique — non confirmé au sol';
+}
+
+// Advisory fire-signature line (lib/firesignature.ts) — a plain-language
+// label plus the plausibility score, never presented alone: the caveat
+// (real current sample size, honest tier breakdown) travels with it as a
+// separate field (fireLikelihoodCaveat below) so a UI can show both
+// together, but neither hardcodes the other's wording.
+export function fireLikelihoodLine(fl: FireLikelihoodResult | undefined): string | undefined {
+  if (!fl) return undefined;
+  const regionBit = fl.matchedRegion ? ` — proche du pattern observé : ${fl.matchedRegion}` : '';
+  return `🔬 ${fl.label} (indice ${fl.score}/100)${regionBit}`;
 }
 
 // Display hierarchy fix: an industrial-context event must lead with that
@@ -156,6 +168,8 @@ export function toDashboardEvent(event: FireEvent, referenceTime: Date = new Dat
     landUseContext: event.landUse?.context,
     landUseSiteName: event.landUse?.siteName,
     inForest: event.inForest,
+    fireLikelihoodLine: fireLikelihoodLine(event.fireLikelihood),
+    fireLikelihoodCaveat: event.fireLikelihood?.caveat,
     title: eventTitle(event.landUse?.context),
     industrialLeadLine: isIndustrial ? industrialLeadLine(event.landUse!.siteName) : undefined,
     positionSource: event.positionSource ?? 'viirs',

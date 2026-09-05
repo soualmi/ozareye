@@ -39,12 +39,14 @@
     "test:meteosat-fasttrack": "tsx --test lib/meteosat-fasttrack.test.ts",
     "test:replay-meteosat-fasttrack": "tsx --test lib/replay-meteosat-fasttrack.test.ts",
     "test:replay-meteosat-fasttrack-windfail": "tsx --test lib/replay-meteosat-fasttrack-windfail.test.ts",
-    "test": "tsx --test lib/wind.test.ts lib/labels.test.ts lib/wilaya.test.ts lib/clustering.test.ts lib/config.test.ts lib/fetch-timeout.test.ts lib/landuse.test.ts lib/dashboard-view.test.ts lib/live-window.test.ts lib/place-name.test.ts lib/replay.test.ts lib/satellite-names.test.ts lib/source-health.test.ts lib/meteosat.test.ts lib/slstr.test.ts lib/early-detection.test.ts lib/telegram-text.test.ts lib/replay-meteosat.test.ts lib/replay-slstr.test.ts lib/monitor-pipeline.test.ts lib/forestcover.test.ts lib/burnscar.test.ts lib/meteosat-fasttrack.test.ts lib/replay-meteosat-fasttrack.test.ts lib/replay-meteosat-fasttrack-windfail.test.ts",
+    "test:firesignature": "tsx --test lib/firesignature.test.ts",
+    "test": "tsx --test lib/wind.test.ts lib/labels.test.ts lib/wilaya.test.ts lib/clustering.test.ts lib/config.test.ts lib/fetch-timeout.test.ts lib/landuse.test.ts lib/dashboard-view.test.ts lib/live-window.test.ts lib/place-name.test.ts lib/replay.test.ts lib/satellite-names.test.ts lib/source-health.test.ts lib/meteosat.test.ts lib/slstr.test.ts lib/early-detection.test.ts lib/telegram-text.test.ts lib/replay-meteosat.test.ts lib/replay-slstr.test.ts lib/monitor-pipeline.test.ts lib/forestcover.test.ts lib/burnscar.test.ts lib/meteosat-fasttrack.test.ts lib/replay-meteosat-fasttrack.test.ts lib/replay-meteosat-fasttrack-windfail.test.ts lib/firesignature.test.ts",
     "replay": "tsx scripts/replay.ts",
     "replay:metrics": "tsx scripts/replay-metrics.ts",
     "build-industrial-index": "tsx scripts/build-industrial-index.ts",
     "build-firestation-index": "tsx scripts/build-firestation-index.ts",
-    "build-forest-index": "tsx scripts/build-forest-index.ts"
+    "build-forest-index": "tsx scripts/build-forest-index.ts",
+    "build-global-fire-reference": "python3 scripts/build-global-fire-reference.py"
   },
   "dependencies": {
     "@base-ui/react": "1.7.0",
