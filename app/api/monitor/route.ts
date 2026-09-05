@@ -15,9 +15,12 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import {
-  ALERT_SCORE_THRESHOLD, clusterDetections, earlySignalText, effectiveProximityKm, enrichWeather, eventWilaya, fetchDetections, hasNearbyVillage, shouldSendEarlyNotice, telegramText,
-  FIRMS_SOURCES, MTG_SOURCE, SLSTR_SOURCE, type FireEvent,
+  clusterDetections, earlySignalText, effectiveProximityKm, enrichWeather, eventWilaya, fetchDetections, shouldSendEarlyNotice,
+  FIRMS_SOURCES, MTG_SOURCE, SLSTR_SOURCE,
 } from '@/lib/fire-monitor';
+// When to message, and which message: the standard rule (unchanged) plus
+// the quiet regime for known industrial sites — see lib/notification-cadence.ts.
+import { decideNotification, notificationText, type NotificationKind } from '@/lib/notification-cadence';
 import { fetchMeteosatSlots } from '@/lib/meteosat';
 import { fetchSlstrPasses } from '@/lib/slstr';
 // Persistent-source guard, signal-2 annotation and the land-use step live in
@@ -35,32 +38,6 @@ import { preferIpv4 } from '@/lib/prefer-ipv4';
 // server runs our own code — so every outbound lookup in the run below
 // resolves A records first. See lib/prefer-ipv4.ts.
 preferIpv4();
-
-const ESCALATION_SCORE_DELTA = 15;
-const STATUS_RANK: Record<FireEvent['status'], number> = { observation: 0, corroborated: 1, urgent: 2 };
-
-// Meteosat/SLSTR fusion, rule (e)/(c), locked and extended to SLSTR: a
-// secondary-only event (Meteosat-only, SLSTR-only, or a mix) alerts ONLY
-// once it's cleared the secondary alert gate (already enforced by
-// scoreEvent() capping status at 'corroborated' only when that gate is met —
-// 'observation' otherwise) AND a village sits within the widened proximity
-// radius (±3km for Meteosat, ±1km for SLSTR — effectiveProximityKm already
-// knows the difference). Status can never exceed 'corroborated' for these
-// events, so there is no "escalation" to re-alert on — this fires exactly
-// once, when the gate is first met, same one-shot shape as a VIIRS event's
-// very first alert.
-function shouldAlert(event: FireEvent, proximityKm: number) {
-  if (event.positionSource === 'meteosat' || event.positionSource === 'slstr') {
-    if (event.status !== 'corroborated') return false;
-    if (!hasNearbyVillage(event, effectiveProximityKm(event, proximityKm))) return false;
-    return event.notifiedStatus !== 'corroborated';
-  }
-  if (event.score < ALERT_SCORE_THRESHOLD) return false;
-  if (!event.notifiedAt) return true;
-  const scoreGrew = event.score - (event.notifiedScore ?? 0) >= ESCALATION_SCORE_DELTA;
-  const statusEscalated = STATUS_RANK[event.status] > STATUS_RANK[event.notifiedStatus ?? 'observation'];
-  return scoreGrew || statusEscalated;
-}
 
 // Two independent credentials, either one sufficient — never removed, only
 // added to. The VPS/systemd cron (scripts/run-monitor.sh) sends
@@ -143,6 +120,7 @@ async function runMonitor(request: Request): Promise<Response> {
 
   let sent = 0;
   const alertsPerWilaya: Record<string, number> = {};
+  const sentKinds: Partial<Record<NotificationKind, number>> = {};
   for (const raw of events) {
     // A Meteosat-only event never carries real FRP/confidence, so its raw
     // score alone rarely crosses 55 — but rule (e)'s gate needs real
@@ -158,8 +136,11 @@ async function runMonitor(request: Request): Promise<Response> {
     event = applyForestCover(event);
     event = applyFireLikelihood(event);
     const proximityKm = effectiveProximityKm(event, config.proximityKm);
-    const alerting = shouldAlert(event, config.proximityKm);
-    if (alerting) {
+    // null = stay silent this poll. For a non-industrial event this is
+    // exactly the old shouldAlert() verdict; for an industrial one it's the
+    // quiet regime (first alert, then urgent/reminder/de-escalation only).
+    const kind = decideNotification(event, config.proximityKm);
+    if (kind) {
       const wilaya = eventWilaya(event);
       const destination = chatIdForWilaya(wilaya, chatId);
       // Previously unguarded: a network error or hung request here would
@@ -169,16 +150,21 @@ async function runMonitor(request: Request): Promise<Response> {
       // on the next poll instead of getting silently marked as sent), loop
       // continues.
       try {
-        const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id: destination, text: telegramText(event, undefined, proximityKm), disable_web_page_preview: true }), signal: AbortSignal.timeout(10_000) });
+        const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id: destination, text: notificationText(event, kind, undefined, proximityKm), disable_web_page_preview: true }), signal: AbortSignal.timeout(10_000) });
         if (response.ok) {
+          // Same three fields for every kind: a reminder restarts its 3h
+          // clock, a de-escalation records the lower status so the next
+          // poll is silent again, an escalation records 'urgent'.
           event.notifiedAt = new Date().toISOString(); event.notifiedScore = event.score; event.notifiedStatus = event.status; sent++;
           const key = wilaya ?? 'inconnue';
           alertsPerWilaya[key] = (alertsPerWilaya[key] ?? 0) + 1;
+          sentKinds[kind] = (sentKinds[kind] ?? 0) + 1;
+          if (kind !== 'alert') console.log(`industrial ${kind} sent for event ${event.id} (${event.landUse?.siteName ?? 'site'}), status ${event.status}`);
         }
       } catch (error) {
         console.log(`Telegram send FAILED for event ${event.id}: ${error instanceof Error ? error.message : error}`);
       }
-    } else if (shouldSendEarlyNotice(event, alerting)) {
+    } else if (shouldSendEarlyNotice(event, false)) {
       // Tier 1: a deliberately separate, lightweight send — same fail-soft
       // shape as the real alert above (a failure here must never crash the
       // run or mark the event as notified), but its own text, its own
@@ -194,7 +180,7 @@ async function runMonitor(request: Request): Promise<Response> {
     }
     await saveSignal(event);
   }
-  appendRunLog({ sources: sourcesLog, events: events.length, sent, alertsPerWilaya, suppressed: { persistent_source: suppressed } });
+  appendRunLog({ sources: sourcesLog, events: events.length, sent, sentKinds, alertsPerWilaya, suppressed: { persistent_source: suppressed } });
   return Response.json({ ok: true, events: events.length, sent, checkedAt: new Date().toISOString() });
 }
 
