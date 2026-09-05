@@ -866,6 +866,32 @@ export function lowerStatus(status: FireEvent['status']): FireEvent['status'] {
   return status === 'urgent' ? 'corroborated' : 'observation';
 }
 
+// True when at least one detection was flagged by détection précoce signal 2
+// (app/api/monitor/route.ts -> lib/monitor-pipeline.ts annotateFrpAnomaly):
+// its FRP is >= EARLY_DETECTION_ANOMALY_MULTIPLIER x this cell/hour's own
+// 30-day average, with >= EARLY_DETECTION_ANOMALY_MIN_SAMPLES days behind it.
+// Read from the stored flag only — never recomputed here (scoreEvent stays
+// DB-free).
+export function hasFrpAnomaly(event: Pick<FireEvent, 'detections'>): boolean {
+  return event.detections.some(d => d.baselineFrpExceeded === true);
+}
+
+// The industrial-site status cap, made conditional on the site's OWN history
+// — "une usine peut aussi brûler". A known industrial/energy site emitting
+// its NORMAL heat (no signal-2 anomaly: FRP within the multiplier of its own
+// baseline, OR no baseline yet — we can't call "anomalous" what we've never
+// measured) is lowered one rung exactly as before. But when signal 2 has
+// flagged this event's FRP as far above what THIS cell historically
+// produces, the cap does not apply and the real score's status stands,
+// 'urgent' included. This never RAISES a status: it only decides whether
+// the existing one-notch downgrade is applied. Industrial sites are where
+// signal 2 works best (a stable, repeating signature to learn from, unlike a
+// forest location that never repeats) — so this is the anomaly signal
+// overriding the cap, not a new signal.
+export function industrialStatus(event: Pick<FireEvent, 'detections' | 'status'>): FireEvent['status'] {
+  return hasFrpAnomaly(event) ? event.status : lowerStatus(event.status);
+}
+
 // OSM/Overpass site names come back in whatever script the mapper used —
 // often Arabic-only for an industrial zone. Same bidi hazard biText() guards
 // against for village names: a Latin sentence directly against an Arabic run

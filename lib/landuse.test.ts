@@ -27,7 +27,7 @@
 import assert from 'node:assert/strict';
 import { test, before, after, beforeEach } from 'node:test';
 import { lookupLandUse, _clearCacheForTests } from './landuse';
-import { industrialContextLine, lowerStatus, telegramText, type FireEvent, type Detection } from './fire-monitor';
+import { industrialContextLine, industrialStatus, lowerStatus, telegramText, type FireEvent, type Detection } from './fire-monitor';
 
 // Overpass is now only a FALLBACK, reached when the local index
 // (data/industrial-sites.json) is absent or unreadable — see lib/landuse.ts.
@@ -119,6 +119,18 @@ test('lowerStatus: urgent -> corroborated, corroborated -> observation, observat
   assert.equal(lowerStatus('urgent'), 'corroborated');
   assert.equal(lowerStatus('corroborated'), 'observation');
   assert.equal(lowerStatus('observation'), 'observation');
+});
+
+test('industrialStatus: without a signal-2 anomaly the cap applies (normal heat, or no history yet)', () => {
+  assert.equal(industrialStatus(baseEvent({})), 'corroborated', 'no flag at all (no baseline yet) -> flat downgrade, as before');
+  assert.equal(industrialStatus(baseEvent({ detections: [det({ baselineFrpExceeded: false })] })), 'corroborated', 'flag false (FRP within the multiplier of its own baseline) -> downgrade');
+  assert.equal(industrialStatus(baseEvent({ status: 'corroborated' })), 'observation');
+});
+
+test('industrialStatus: a signal-2 anomaly against the site\'s own history lets the real status stand, urgent included', () => {
+  assert.equal(industrialStatus(baseEvent({ detections: [det({ frp: 150, baselineFrpExceeded: true })] })), 'urgent');
+  assert.equal(industrialStatus(baseEvent({ detections: [det({}), det({ frp: 150, baselineFrpExceeded: true })] })), 'urgent', 'one flagged detection among several is enough — same rule scoreEvent uses for the +10 boost');
+  assert.equal(industrialStatus(baseEvent({ status: 'observation', detections: [det({ baselineFrpExceeded: true })] })), 'observation', 'never raises — only decides whether the downgrade applies');
 });
 
 test('telegramText: an industrial-context event states the context plainly and keeps the existing disclaimer', () => {

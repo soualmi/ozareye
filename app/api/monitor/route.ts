@@ -15,13 +15,16 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import {
-  ALERT_SCORE_THRESHOLD, clusterDetections, EARLY_DETECTION_ANOMALY_MIN_SAMPLES, EARLY_DETECTION_ANOMALY_MULTIPLIER, effectiveProximityKm, enrichWeather, eventWilaya, fetchDetections, gridCell, hasNearbyVillage, isMeteosatDetection, lowerStatus, telegramText,
-  DEFAULT_PERSISTENT_SOURCE_WINDOW_DAYS, FIRMS_SOURCES, MTG_SOURCE, SLSTR_SOURCE, type Detection, type FireEvent,
+  ALERT_SCORE_THRESHOLD, clusterDetections, effectiveProximityKm, enrichWeather, eventWilaya, fetchDetections, hasNearbyVillage, telegramText,
+  FIRMS_SOURCES, MTG_SOURCE, SLSTR_SOURCE, type FireEvent,
 } from '@/lib/fire-monitor';
 import { fetchMeteosatSlots } from '@/lib/meteosat';
 import { fetchSlstrPasses } from '@/lib/slstr';
-import { lookupLandUse } from '@/lib/landuse';
-import { activeEvents, distinctDayCount, frpBaseline, getConfig, initDb, isFirstRun, pruneFrpHistory, pruneHotspotHistory, recordDetectionDay, recordFrpObservation, saveSignal, type EngineConfig } from '@/lib/database';
+// Persistent-source guard, signal-2 annotation and the land-use step live in
+// lib/monitor-pipeline.ts (testable against a temp DB) — see there for the
+// annotate-before-suppress ordering and the conditional industrial cap.
+import { applyLandUse, prepareDetections } from '@/lib/monitor-pipeline';
+import { activeEvents, getConfig, initDb, isFirstRun, saveSignal, type EngineConfig } from '@/lib/database';
 import { bboxToString } from '@/scripts/build-villages';
 import { chatIdForWilaya } from '@/lib/wilaya-routing';
 import { appendRunLog } from '@/lib/run-log';
@@ -57,98 +60,6 @@ function shouldAlert(event: FireEvent, proximityKm: number) {
   const scoreGrew = event.score - (event.notifiedScore ?? 0) >= ESCALATION_SCORE_DELTA;
   const statusEscalated = STATUS_RANK[event.status] > STATUS_RANK[event.notifiedStatus ?? 'observation'];
   return scoreGrew || statusEscalated;
-}
-
-// Records every detection's (cell, day) and drops detections from cells that
-// have shown up on more than persistentSourceDays distinct days in the
-// rolling window — a real wildfire doesn't keep re-igniting the same 1km spot
-// for weeks; a gas flare or industrial heat source does. persistentSourceDays
-// comes from the region config (/setup); the window itself stays fixed.
-async function suppressPersistentSources(detections: Detection[], persistentSourceDays: number): Promise<{ kept: Detection[]; suppressed: number }> {
-  const cutoff = new Date(Date.now() - DEFAULT_PERSISTENT_SOURCE_WINDOW_DAYS * 86_400_000).toISOString().slice(0, 10);
-  await pruneHotspotHistory(cutoff);
-
-  const cellDays = new Map<string, Set<string>>();
-  for (const det of detections) {
-    const cell = gridCell(det.latitude, det.longitude);
-    const day = det.acquiredAt.slice(0, 10);
-    if (!cellDays.has(cell)) cellDays.set(cell, new Set());
-    cellDays.get(cell)!.add(day);
-  }
-  for (const [cell, days] of cellDays) for (const day of days) await recordDetectionDay(cell, day);
-
-  const persistentCells = new Set<string>();
-  for (const cell of cellDays.keys()) {
-    const count = await distinctDayCount(cell, cutoff);
-    if (count > persistentSourceDays) persistentCells.add(cell);
-  }
-
-  const kept: Detection[] = [];
-  let suppressed = 0;
-  for (const det of detections) {
-    const cell = gridCell(det.latitude, det.longitude);
-    if (persistentCells.has(cell)) { suppressed++; console.log(`suppressed: persistent source (cell ${cell})`); }
-    else kept.push(det);
-  }
-  return { kept, suppressed };
-}
-
-// Détection précoce, signal 2 (lib/fire-monitor.ts's EARLY_DETECTION_ANOMALY_*):
-// flags a detection whose FRP is significantly above the stored 30-day
-// local (cell, hour-of-day) baseline — reuses hotspot_days' window/cutoff
-// shape (see suppressPersistentSources above), on the sibling frp_history
-// table (lib/database.ts). The baseline is read BEFORE today's own value is
-// recorded, so a detection is never compared against itself. Meteosat
-// detections are skipped entirely — they carry no FRP to compare (always
-// 0). SLSTR detections are NOT skipped: unlike Meteosat, SLSTR carries a
-// real per-detection FRP (see lib/slstr.ts), so it's a legitimate anomaly
-// signal too, and isMeteosatDetection() below only ever excludes Meteosat.
-// Fail-soft per detection: any DB error just skips that one detection's
-// annotation, never blocks or throws.
-async function annotateFrpAnomaly(detections: Detection[]): Promise<Detection[]> {
-  const cutoff = new Date(Date.now() - DEFAULT_PERSISTENT_SOURCE_WINDOW_DAYS * 86_400_000).toISOString().slice(0, 10);
-  await pruneFrpHistory(cutoff);
-
-  const out: Detection[] = [];
-  for (const det of detections) {
-    if (isMeteosatDetection(det)) { out.push(det); continue; }
-    const cell = gridCell(det.latitude, det.longitude);
-    const day = det.acquiredAt.slice(0, 10);
-    const hour = new Date(det.acquiredAt).getUTCHours();
-
-    // Two independent fail-soft steps, each pushed/recorded exactly once —
-    // a failure in either must never duplicate or drop this detection.
-    let annotated = det;
-    try {
-      const baseline = await frpBaseline(cell, hour, cutoff);
-      if (baseline !== null && baseline.days >= EARLY_DETECTION_ANOMALY_MIN_SAMPLES && det.frp >= baseline.avgFrp * EARLY_DETECTION_ANOMALY_MULTIPLIER) {
-        annotated = { ...det, baselineFrpExceeded: true };
-      }
-    } catch (error) {
-      console.log(`FRP baseline lookup FAILED for cell ${cell}h${hour}, skipping anomaly annotation: ${error instanceof Error ? error.message : error}`);
-    }
-    out.push(annotated);
-
-    try {
-      await recordFrpObservation(cell, day, hour, det.frp);
-    } catch (error) {
-      console.log(`FRP observation record FAILED for cell ${cell}h${hour}: ${error instanceof Error ? error.message : error}`);
-    }
-  }
-  return out;
-}
-
-// Land-use context (lib/landuse.ts, an OSM/Overpass lookup): tags an event
-// when it sits on a known industrial/energy site and lowers its status one
-// rung so it never reads as a top "urgent" red alert for what is very likely
-// a permanent heat source — but never drops it, since an industrial site can
-// genuinely catch fire too. Runs for every clustered event; Overpass calls
-// are cached per ~1km cell and fail soft (context 'unknown', event
-// untouched otherwise) — see lib/landuse.ts.
-async function applyLandUse(event: FireEvent): Promise<FireEvent> {
-  const landUse = await lookupLandUse(event.latitude, event.longitude);
-  if (landUse.context !== 'industrial') return { ...event, landUse };
-  return { ...event, landUse, status: lowerStatus(event.status) };
 }
 
 // Two independent credentials, either one sufficient — never removed, only
@@ -211,8 +122,7 @@ async function runMonitor(request: Request): Promise<Response> {
   const slstrResult = await fetchSlstrPasses(config.bbox);
   await recordSourceOutcome(SLSTR_SOURCE, slstrResult.ok ? { success: true } : { success: false, error: slstrResult.error ?? 'erreur inconnue' });
 
-  const { kept, suppressed } = await suppressPersistentSources([...rawDetections, ...meteosatResult.detections, ...slstrResult.detections], config.persistentSourceDays);
-  const detections = await annotateFrpAnomaly(kept);
+  const { detections, suppressed } = await prepareDetections([...rawDetections, ...meteosatResult.detections, ...slstrResult.detections], config.persistentSourceDays);
   const events = clusterDetections(detections, await activeEvents(), config.frpThresholdMw);
 
   const sourcesLog = [
