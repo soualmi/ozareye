@@ -14,9 +14,9 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-// Sentinel-2 dNBR burn-scar verification — SCAFFOLD pending real Sentinel-2
-// access (Microsoft Planetary Computer STAC, see scripts/burn-scar-verify.py's
-// header for the Step 1 access decision and the exact TODO).
+// Sentinel-2 dNBR burn-scar verification, real imagery from Microsoft
+// Planetary Computer (anonymous STAC + SAS; see scripts/burn-scar-verify.py's
+// header for the access decision and band/threshold choices).
 //
 // This is NOT a detection source like lib/slstr.ts / lib/meteosat.ts: it runs
 // days AFTER an event, asks "does an optical burn scar actually appear on the
@@ -35,9 +35,9 @@ import type { FireEvent } from './fire-monitor';
 
 export const BURN_SCAR_SOURCE = 'sentinel2-dnbr';
 const SCRIPT_PATH = path.join(process.cwd(), 'scripts', 'burn-scar-verify.py');
-// scripts/burn-scar-verify.py exits 3 when fetch_sentinel2_scene() is still
-// the stub — "quietly unavailable", distinct from a real failure (exit 1),
-// so a watchdog can tell "not wired yet" from "wired and broken".
+// scripts/burn-scar-verify.py reserves exit 3 for "quietly unavailable"
+// (it was the stub's code before the fetch was wired) — kept distinct from
+// a real failure (exit 1) so a watchdog can tell the two apart.
 const EXIT_NOT_IMPLEMENTED = 3;
 
 export type BurnScarResult = BurnScarVerificationRow;

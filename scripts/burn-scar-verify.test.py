@@ -16,7 +16,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 #
 # Tests for scripts/burn-scar-verify.py's math, window and classification —
-# everything that does NOT need real imagery. Runs standalone
+# everything that does NOT need real imagery (no network in this suite). Runs standalone
 # (`python3 scripts/burn-scar-verify.test.py`) and under pytest
 # (`pytest scripts/burn-scar-verify.test.py`); lib/burnscar.test.ts runs the
 # standalone form as a subprocess so `npm test` covers it.
@@ -109,6 +109,18 @@ def test_too_cloudy_roi_yields_no_mean_and_indetermine():
     assert bsv.classify(mean) == 'indéterminé'
 
 
+def test_roi_restricts_mean_and_fraction_denominator():
+    # Same 2x2 as above; ROI excludes p2 (dNBR 0.0). Fraction is over ROI
+    # pixels only (3/3 = 1.0), never penalised by the excluded corner.
+    roi = np.array([[True, False], [True, True]])
+    mean, frac = bsv.dnbr_mean(NIR_PRE, SWIR_PRE, SCL_CLEAR, NIR_POST, SWIR_POST, SCL_CLEAR, roi=roi)
+    assert close(frac, 1.0)
+    assert close(mean, (0.70 + 0.30 + 0.20) / 3)
+    scl_post = SCL_CLEAR.copy(); scl_post[1, 1] = 9
+    mean, frac = bsv.dnbr_mean(NIR_PRE, SWIR_PRE, SCL_CLEAR, NIR_POST, SWIR_POST, scl_post, roi=roi)
+    assert close(frac, 2 / 3) and mean is None, '2 of 3 ROI pixels < 0.7 -> indéterminé'
+
+
 def test_scl_invalid_classes_match_sen2cor_definition():
     assert bsv.valid_mask([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]).tolist() == [False, False, True, False, True, True, True, True, False, False, False, False]
 
@@ -185,20 +197,34 @@ def test_parse_event_id_matches_fire_monitor_format():
     assert (lat, lon) == (35.1, -1.25), 'negative longitude (western Algeria/Morocco) survives the dash split'
 
 
-def test_fetch_stub_raises_not_implemented():
+def test_fetch_requires_explicit_window():
     try:
         bsv.fetch_sentinel2_scene(36.5, 5.5, T0, 40)
-    except NotImplementedError as e:
-        assert 'Planetary Computer' in str(e)
+    except ValueError as e:
+        assert 'window' in str(e)
     else:
-        raise AssertionError('stub must raise until real access is wired')
+        raise AssertionError('a fetch without a (start, end) window must be rejected before any network call')
 
 
-def test_main_returns_3_on_stub_and_0_on_windows_only():
-    err = io.StringIO()
-    with contextlib.redirect_stderr(err):
-        code = bsv.main(['--lat', '36.5', '--lon', '5.5', '--date', '2026-08-20T12:00:00Z'])
-    assert code == 3 and 'NOT_IMPLEMENTED' in err.getvalue()
+def test_dn_to_reflectance_applies_boa_offset_from_baseline_04():
+    # Baseline >= 04.00: reflectance = (DN - 1000) / 10000
+    assert close(float(bsv.dn_to_reflectance([5500], '05.11')[0]), 0.45)
+    assert close(float(bsv.dn_to_reflectance([1000], '04.00')[0]), 0.0)
+    # Older baselines: reflectance = DN / 10000, no offset
+    assert close(float(bsv.dn_to_reflectance([4500], '03.01')[0]), 0.45)
+    # DN 0 is no-data on every baseline -> 0.0 (so nbr() yields NaN), never -0.1
+    assert float(bsv.dn_to_reflectance([0], '05.11')[0]) == 0.0
+    # Values below the offset clip to 0 rather than going negative
+    assert float(bsv.dn_to_reflectance([500], '05.11')[0]) == 0.0
+
+
+def test_disc_mask_keeps_centre_drops_corners():
+    m = bsv.disc_mask((5, 5), 2)
+    assert m[2, 2] and m[0, 2] and m[2, 0]
+    assert not m[0, 0] and not m[4, 4]
+
+
+def test_main_windows_only_returns_0():
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
         code = bsv.main(['--event-id', 'evt-36.500-5.500-2026-08-20T12:00:00Z', '--windows-only'])
@@ -207,7 +233,7 @@ def test_main_returns_3_on_stub_and_0_on_windows_only():
 
 def test_result_row_shape():
     row = bsv.result_row('evt-x', {'date': T0, 'cloud_cover': 1.5}, {'date': T0 + datetime.timedelta(days=5), 'cloud_cover': 8.7}, 0.70, 1.0, 750)
-    assert set(row) == {'event_id', 'pre_date', 'post_date', 'dnbr_mean', 'classification', 'usgs_severity', 'cloud_cover_pre', 'cloud_cover_post', 'valid_pixel_fraction', 'roi_radius_m'}
+    assert set(row) == {'event_id', 'pre_date', 'post_date', 'dnbr_mean', 'classification', 'usgs_severity', 'cloud_cover_pre', 'cloud_cover_post', 'valid_pixel_fraction', 'roi_radius_m', 'pre_scene', 'post_scene'}
     assert row['pre_date'] == '2026-08-20' and row['post_date'] == '2026-08-25'
     assert row['dnbr_mean'] == 0.7 and row['classification'] == 'confirmé' and row['usgs_severity'] == 'high'
 

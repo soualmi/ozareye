@@ -15,8 +15,8 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 #
-# Sentinel-2 before/after burn-scar verification for one OzarEye event —
-# SCAFFOLD, pending real Sentinel-2 access (see fetch_sentinel2_scene below).
+# Sentinel-2 before/after burn-scar verification for one OzarEye event,
+# fetching real imagery from Microsoft Planetary Computer (fetch_sentinel2_scene).
 #
 # Invoked by lib/burnscar.ts (one subprocess per event) exactly like
 # scripts/slstr-fetch.py is by lib/slstr.ts: arguments in, one JSON line on
@@ -46,9 +46,9 @@
 # live from this VPS with NO account: the STAC search and the SAS token
 # endpoint both answer anonymously (Microsoft's own docs: "The STAC API is
 # public and can be accessed anonymously. Most data can be downloaded
-# anonymously, but will be throttled."). Runtime deps to add when wiring the
-# real fetch (none installed tonight, none needed for the math/tests):
-#     pip3 install pystac-client planetary-computer rasterio
+# anonymously, but will be throttled."). Runtime deps (system python, same
+# /usr/local dist-packages as eumdac; not needed for the math/tests):
+#     pip3 install --break-system-packages pystac-client planetary-computer rasterio
 # Alternatives kept for the record: Copernicus Data Space Ecosystem (STAC
 # search is anonymous too, but assets are s3://eodata URIs needing an
 # account + S3 keys) and Google Earth Engine (Google account + Cloud project
@@ -57,8 +57,8 @@
 # Output (one JSON object on stdout):
 #   {event_id, pre_date, post_date, dnbr_mean, classification,
 #    cloud_cover_pre, cloud_cover_post, valid_pixel_fraction, roi_radius_m}
-# Exit codes: 0 ok, 1 error, 3 NOT_IMPLEMENTED (access not wired yet —
-# lib/burnscar.ts treats 3 as "quietly unavailable", not as a source failure).
+# Exit codes: 0 ok, 1 error, 3 NOT_IMPLEMENTED (kept for lib/burnscar.ts's
+# "quietly unavailable" path; no longer raised now that the fetch is real).
 import argparse
 import datetime
 import json
@@ -126,7 +126,7 @@ SCL_INVALID = (0, 1, 3, 8, 9, 10, 11)
 # (2022-01-25) a BOA_ADD_OFFSET of -1000 applies: reflectance = (DN-1000)/10000.
 # NBR is a RATIO, so forgetting the offset biases it — the fetch stub must
 # apply this using the item's s2:processing_baseline before handing arrays
-# to nbr(). Kept here so the constant lives next to the math it protects.
+# to nbr() — dn_to_reflectance() below does exactly that.
 L2A_QUANTIFICATION = 10000.0
 L2A_BOA_ADD_OFFSET = -1000
 L2A_OFFSET_BASELINE = '04.00'
@@ -156,11 +156,19 @@ def valid_mask(scl):
     return ~np.isin(scl, SCL_INVALID)
 
 
-def dnbr_mean(nir_pre, swir2_pre, scl_pre, nir_post, swir2_post, scl_post):
+def dnbr_mean(nir_pre, swir2_pre, scl_pre, nir_post, swir2_post, scl_post, roi=None):
     """Mean dNBR over pixels valid on BOTH dates. Returns (mean, valid_fraction);
-    mean is None when fewer than MIN_VALID_PIXEL_FRACTION of pixels are usable."""
+    mean is None when fewer than MIN_VALID_PIXEL_FRACTION of pixels are usable.
+    `roi` (bool array, optional) restricts both the mean and the fraction's
+    denominator to the circular ROI, so the square window's corners never
+    count against the cloud allowance."""
     mask = valid_mask(scl_pre) & valid_mask(scl_post)
-    valid_fraction = float(mask.mean()) if mask.size else 0.0
+    if roi is not None:
+        roi = np.asarray(roi, dtype=bool)
+        mask = mask & roi
+        valid_fraction = float(mask.sum() / roi.sum()) if roi.sum() else 0.0
+    else:
+        valid_fraction = float(mask.mean()) if mask.size else 0.0
     if valid_fraction < MIN_VALID_PIXEL_FRACTION:
         return None, valid_fraction
     d = dnbr(nbr(nir_pre, swir2_pre), nbr(nir_post, swir2_post))
@@ -245,30 +253,108 @@ def parse_event_id(event_id):
     return float(lat_str), float(lon_str), parse_date(date_str)
 
 
-def fetch_sentinel2_scene(lat, lon, date, cloud_max, roi_radius_m=DEFAULT_ROI_RADIUS_M, window=None):
-    """STUB — real Sentinel-2 access is not wired yet (no account/deps tonight).
+PC_STAC_URL = 'https://planetarycomputer.microsoft.com/api/stac/v1'
+PC_COLLECTION = 'sentinel-2-l2a'
+# GDAL settings for reading a small window out of a remote COG over HTTPS:
+# no directory listing on open (one HEAD/GET, not a scan of the blob
+# container) and multi-range requests so the three bands cost a handful of
+# range requests each, not a full-tile download.
+GDAL_ENV = {'GDAL_DISABLE_READDIR_ON_OPEN': 'EMPTY_DIR', 'GDAL_HTTP_MULTIRANGE': 'YES', 'GDAL_HTTP_MERGE_CONSECUTIVE_RANGES': 'YES', 'CPL_VSIL_CURL_ALLOWED_EXTENSIONS': '.tif,.tiff,.jp2'}
 
-    TODO(sentinel-2 access): implement against Microsoft Planetary Computer
-    (recommended, Step 1 of this feature; anonymous read access verified from
-    this VPS on 2026-09-05):
-      1. pystac_client.Client.open('https://planetarycomputer.microsoft.com/api/stac/v1',
-             modifier=planetary_computer.sign_inplace)
-      2. search(collections=['sentinel-2-l2a'], intersects=Point(lon, lat),
-             datetime=f'{window_start}/{window_end}',
-             query={'eo:cloud_cover': {'lte': cloud_max}}) -> items
-      3. pick_scenes() above chooses pre/post from items' datetime +
-         eo:cloud_cover; the item's `s2:processing_baseline` decides whether
-         L2A_BOA_ADD_OFFSET applies.
-      4. rasterio.open(item.assets['B8A'].href) / ['B12'] / ['SCL'] and read
-         ONLY the ROI window: a roi_radius_m disc around (lat, lon) projected
-         into the item's UTM EPSG (proj:epsg) — ~75x75 px at 20m, a few
-         hundred KB of HTTP range requests per band, never the whole tile.
-      5. Return dict(nir=..., swir2=..., scl=..., date=item.datetime,
-         cloud_cover=item.properties['eo:cloud_cover']) with nir/swir2 already
-         converted to reflectance ((DN + offset) / L2A_QUANTIFICATION).
-    Deps: pip3 install pystac-client planetary-computer rasterio
-    """
-    raise NotImplementedError('Sentinel-2 access not wired yet — see fetch_sentinel2_scene() TODO (Planetary Computer STAC + SAS)')
+
+def search_scenes(lat, lon, window_start, window_end, cloud_max):
+    """STAC search on Planetary Computer (anonymous; verified 2026-09-05).
+    Returns pick_scenes()-shaped candidates carrying the signed pystac item."""
+    import planetary_computer
+    import pystac_client
+
+    catalog = pystac_client.Client.open(PC_STAC_URL, modifier=planetary_computer.sign_inplace)
+    search = catalog.search(
+        collections=[PC_COLLECTION],
+        intersects={'type': 'Point', 'coordinates': [lon, lat]},
+        datetime=f'{window_start.isoformat()}/{window_end.isoformat()}',
+        query={'eo:cloud_cover': {'lte': cloud_max}},
+    )
+    candidates = []
+    for item in search.items():
+        candidates.append({'datetime': item.datetime.astimezone(datetime.timezone.utc), 'cloud_cover': item.properties.get('eo:cloud_cover'), 'item': item})
+    return candidates
+
+
+def read_roi_band(href, lat, lon, roi_radius_m):
+    """Read a square window of (2r+1)^2 pixels centred on (lat, lon) from a
+    remote COG, boundless (0-filled outside the tile) so a point near a tile
+    edge still returns a full-shaped array. Returns (array, pixel_size_m)."""
+    import rasterio
+    from rasterio.warp import transform as warp_transform
+    from rasterio.windows import Window
+
+    with rasterio.Env(**GDAL_ENV), rasterio.open(href) as src:
+        xs, ys = warp_transform('EPSG:4326', src.crs, [lon], [lat])
+        row, col = src.index(xs[0], ys[0])
+        pixel_m = float(src.res[0])
+        r = int(round(roi_radius_m / pixel_m))
+        window = Window(col - r, row - r, 2 * r + 1, 2 * r + 1)
+        data = src.read(1, window=window, boundless=True, fill_value=0)
+    return data, pixel_m
+
+
+def disc_mask(shape, radius_px):
+    """True inside the circular ROI, False in the square's corners."""
+    rows, cols = np.ogrid[:shape[0], :shape[1]]
+    cy, cx = shape[0] // 2, shape[1] // 2
+    return (rows - cy) ** 2 + (cols - cx) ** 2 <= radius_px ** 2
+
+
+def dn_to_reflectance(dn, processing_baseline):
+    """L2A DN -> BOA reflectance. Baseline >= 04.00 carries BOA_ADD_OFFSET
+    (-1000); DN 0 is no-data on every baseline and stays 0 so nbr() yields
+    NaN there instead of a bogus (-0.1)/(-0.1) ratio."""
+    dn = np.asarray(dn, dtype=np.float64)
+    offset = L2A_BOA_ADD_OFFSET if (processing_baseline or '00.00') >= L2A_OFFSET_BASELINE else 0
+    refl = (dn + offset) / L2A_QUANTIFICATION
+    refl[dn == 0] = 0.0
+    return np.clip(refl, 0.0, None)
+
+
+def fetch_sentinel2_scene(lat, lon, date, cloud_max, roi_radius_m=DEFAULT_ROI_RADIUS_M, window=None):
+    """Find the best scene in `window` for (lat, lon) on Planetary Computer
+    and read the ROI's B8A / B12 / SCL bands. `window` is (start, end) UTC;
+    a window ending at or before `date` is the PRE search (latest scene
+    wins), otherwise POST (earliest wins) — the same pick_scenes() rule the
+    unit tests pin down. Returns None when no acceptable scene exists yet.
+
+    Access: Microsoft Planetary Computer STAC + anonymous SAS signing
+    (planetary_computer.sign_inplace). No account involved."""
+    if window is None:
+        raise ValueError('fetch_sentinel2_scene needs an explicit (start, end) window')
+    window_start, window_end = window
+    candidates = search_scenes(lat, lon, window_start, window_end, cloud_max)
+    pre, post = pick_scenes(candidates, date, cloud_max)
+    chosen = pre if window_end <= date else post
+    if chosen is None:
+        return None
+    # Overlapping MGRS tiles: several items share the same acquisition minute;
+    # prefer the least cloudy one, the point is inside all of them anyway.
+    same_pass = [c for c in candidates if abs((c['datetime'] - chosen['datetime']).total_seconds()) < 120]
+    chosen = min(same_pass, key=lambda c: c['cloud_cover'] if c['cloud_cover'] is not None else 1e9)
+    item = chosen['item']
+    baseline = item.properties.get('s2:processing_baseline')
+
+    nir_dn, pixel_m = read_roi_band(item.assets['B8A'].href, lat, lon, roi_radius_m)
+    swir_dn, _ = read_roi_band(item.assets['B12'].href, lat, lon, roi_radius_m)
+    scl, _ = read_roi_band(item.assets['SCL'].href, lat, lon, roi_radius_m)
+
+    return {
+        'nir': dn_to_reflectance(nir_dn, baseline),
+        'swir2': dn_to_reflectance(swir_dn, baseline),
+        'scl': scl,
+        'roi': disc_mask(scl.shape, roi_radius_m / pixel_m),
+        'date': chosen['datetime'],
+        'cloud_cover': chosen['cloud_cover'],
+        'scene_id': item.id,
+        'processing_baseline': baseline,
+    }
 
 
 def verify_event(event_id, lat, lon, first_detection, cloud_max=DEFAULT_CLOUD_MAX, roi_radius_m=DEFAULT_ROI_RADIUS_M):
@@ -277,7 +363,7 @@ def verify_event(event_id, lat, lon, first_detection, cloud_max=DEFAULT_CLOUD_MA
     post = fetch_sentinel2_scene(lat, lon, first_detection, cloud_max, roi_radius_m, window=(post_start, post_end))
     if pre is None or post is None:
         return result_row(event_id, pre, post, None, 0.0, roi_radius_m)
-    mean, valid_fraction = dnbr_mean(pre['nir'], pre['swir2'], pre['scl'], post['nir'], post['swir2'], post['scl'])
+    mean, valid_fraction = dnbr_mean(pre['nir'], pre['swir2'], pre['scl'], post['nir'], post['swir2'], post['scl'], roi=pre.get('roi'))
     return result_row(event_id, pre, post, mean, valid_fraction, roi_radius_m)
 
 
@@ -293,6 +379,8 @@ def result_row(event_id, pre, post, mean, valid_fraction, roi_radius_m):
         'cloud_cover_post': post.get('cloud_cover') if post else None,
         'valid_pixel_fraction': round(valid_fraction, 3),
         'roi_radius_m': roi_radius_m,
+        'pre_scene': pre.get('scene_id') if pre else None,
+        'post_scene': post.get('scene_id') if post else None,
     }
 
 

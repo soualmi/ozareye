@@ -19,7 +19,9 @@
 // scripts/burn-scar-verify.test.py against hand-computed fixtures; that
 // suite is run here as a subprocess so `npm test` covers it. Everything
 // else here is the fail-soft contract and the storage round-trip — no real
-// imagery is touched (the fetch is still a stub).
+// imagery is touched (every path exercised here fails before any network
+// call; the live Planetary Computer fetch is verified by hand, see the
+// wiring commit's message).
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
@@ -53,10 +55,13 @@ test('scene windows: pre ends at detection day (exclusive), post is T+3d..T+15d'
   assert.equal(out.roi_radius_m, 750);
 });
 
-test('verifyBurnScar fails soft while the fetch is still a stub: returns null, never throws, stores nothing', async () => {
-  const result = await verifyBurnScar(event);
-  assert.equal(result, null, 'exit code 3 (NOT_IMPLEMENTED) must map to null');
-  assert.equal(await getBurnScarVerification(event.id), undefined, 'no row is written for an unavailable check');
+test('verifyBurnScar fails soft when the python side errors (exit 1): returns null, never throws, stores nothing', async () => {
+  // An unparseable date makes scripts/burn-scar-verify.py exit 1 before any
+  // network call — exercises the FAILED path without touching Planetary Computer.
+  const broken = { ...event, id: 'evt-broken-date', firstAcquiredAt: 'not-a-date' };
+  const result = await verifyBurnScar(broken);
+  assert.equal(result, null, 'a python failure must map to null');
+  assert.equal(await getBurnScarVerification(broken.id), undefined, 'no row is written for a failed check');
 });
 
 test('verifyBurnScar fails soft on a broken interpreter: returns null, never throws', async () => {
