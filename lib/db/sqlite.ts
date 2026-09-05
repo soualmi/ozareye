@@ -26,7 +26,7 @@ import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { FireEvent } from '../fire-monitor';
-import type { Backend, ConfigPatch, EngineConfig, SourceHealthRow, VillageBuildStatus } from './types';
+import type { Backend, BurnScarVerificationRow, ConfigPatch, EngineConfig, SourceHealthRow, VillageBuildStatus } from './types';
 import { algeriaSeedConfig } from './types';
 
 // Overridable so tests can point at a throwaway file instead of the real,
@@ -70,6 +70,20 @@ const CREATE_SOURCE_HEALTH_TABLE = `CREATE TABLE IF NOT EXISTS source_health (
 
 // Small key/value cursor store — today just Meteosat's ingest "since"
 // timestamp (lib/meteosat.ts).
+// Sentinel-2 dNBR burn-scar verification, one row per checked event —
+// see lib/burnscar.ts. Scaffold table: created now so the schema is settled,
+// written only once real Sentinel-2 access exists.
+const CREATE_BURN_SCAR_TABLE = `CREATE TABLE IF NOT EXISTS burn_scar_verification (
+  event_id TEXT PRIMARY KEY,
+  pre_date TEXT,
+  post_date TEXT,
+  dnbr_mean REAL,
+  classification TEXT NOT NULL,
+  cloud_cover_pre REAL,
+  cloud_cover_post REAL,
+  verified_at TEXT NOT NULL
+)`;
+
 const CREATE_INGEST_STATE_TABLE = `CREATE TABLE IF NOT EXISTS ingest_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`;
 
 // Single-row table (id is always 1) holding the one region/tunables record
@@ -141,10 +155,19 @@ function dbRowToSourceHealth(row: SourceHealthDbRow): SourceHealthRow {
   };
 }
 
+type BurnScarDbRow = { event_id: string; pre_date: string | null; post_date: string | null; dnbr_mean: number | null; classification: BurnScarVerificationRow['classification']; cloud_cover_pre: number | null; cloud_cover_post: number | null; verified_at: string };
+
+function dbRowToBurnScar(row: BurnScarDbRow): BurnScarVerificationRow {
+  return {
+    eventId: row.event_id, preDate: row.pre_date, postDate: row.post_date, dnbrMean: row.dnbr_mean, classification: row.classification,
+    cloudCoverPre: row.cloud_cover_pre, cloudCoverPost: row.cloud_cover_post, verifiedAt: row.verified_at,
+  };
+}
+
 export function createSqliteBackend(): Backend {
   return {
     async initDb() {
-      db().exec(CREATE_TABLE); db().exec(CREATE_INDEX); db().exec(CREATE_HOTSPOT_TABLE); db().exec(CREATE_CONFIG_TABLE); db().exec(CREATE_SOURCE_HEALTH_TABLE); db().exec(CREATE_INGEST_STATE_TABLE); db().exec(CREATE_FRP_HISTORY_TABLE);
+      db().exec(CREATE_TABLE); db().exec(CREATE_INDEX); db().exec(CREATE_HOTSPOT_TABLE); db().exec(CREATE_CONFIG_TABLE); db().exec(CREATE_SOURCE_HEALTH_TABLE); db().exec(CREATE_INGEST_STATE_TABLE); db().exec(CREATE_FRP_HISTORY_TABLE); db().exec(CREATE_BURN_SCAR_TABLE);
     },
 
     // The upsert the whole de-dup fix depends on: SQLite's ON CONFLICT(id) DO
@@ -289,6 +312,22 @@ export function createSqliteBackend(): Backend {
       db().prepare(`INSERT INTO ingest_state (key, value, updated_at) VALUES (@key, @value, @updatedAt)
         ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`)
         .run({ key, value, updatedAt: new Date().toISOString() });
+    },
+
+    async getBurnScarVerification(eventId: string) {
+      const row = db().prepare('SELECT * FROM burn_scar_verification WHERE event_id = ?').get(eventId) as BurnScarDbRow | undefined;
+      return row ? dbRowToBurnScar(row) : undefined;
+    },
+
+    async upsertBurnScarVerification(row: BurnScarVerificationRow) {
+      db().prepare(`INSERT INTO burn_scar_verification (event_id, pre_date, post_date, dnbr_mean, classification, cloud_cover_pre, cloud_cover_post, verified_at)
+        VALUES (@eventId, @preDate, @postDate, @dnbrMean, @classification, @cloudCoverPre, @cloudCoverPost, @verifiedAt)
+        ON CONFLICT(event_id) DO UPDATE SET pre_date=excluded.pre_date, post_date=excluded.post_date, dnbr_mean=excluded.dnbr_mean,
+          classification=excluded.classification, cloud_cover_pre=excluded.cloud_cover_pre, cloud_cover_post=excluded.cloud_cover_post, verified_at=excluded.verified_at`)
+        .run({
+          eventId: row.eventId, preDate: row.preDate, postDate: row.postDate, dnbrMean: row.dnbrMean, classification: row.classification,
+          cloudCoverPre: row.cloudCoverPre, cloudCoverPost: row.cloudCoverPost, verifiedAt: row.verifiedAt,
+        });
     },
   };
 }

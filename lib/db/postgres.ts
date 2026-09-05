@@ -40,7 +40,7 @@
 //     TIMESTAMP/timezone conversion surface to diverge on.
 import { neon } from '@neondatabase/serverless';
 import type { FireEvent } from '../fire-monitor';
-import type { Backend, ConfigPatch, EngineConfig, SourceHealthRow, VillageBuildStatus } from './types';
+import type { Backend, BurnScarVerificationRow, ConfigPatch, EngineConfig, SourceHealthRow, VillageBuildStatus } from './types';
 import { algeriaSeedConfig } from './types';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -119,6 +119,8 @@ export function createPostgresBackend(connectionString: string): Backend {
       )`;
       await sql`CREATE TABLE IF NOT EXISTS ingest_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`;
       await sql`CREATE TABLE IF NOT EXISTS frp_history (cell TEXT NOT NULL, day TEXT NOT NULL, hour INTEGER NOT NULL, max_frp REAL NOT NULL, PRIMARY KEY (cell, day, hour))`;
+      // Sentinel-2 dNBR burn-scar verification (lib/burnscar.ts) — scaffold, same columns as lib/db/sqlite.ts.
+      await sql`CREATE TABLE IF NOT EXISTS burn_scar_verification (event_id TEXT PRIMARY KEY, pre_date TEXT, post_date TEXT, dnbr_mean DOUBLE PRECISION, classification TEXT NOT NULL, cloud_cover_pre DOUBLE PRECISION, cloud_cover_post DOUBLE PRECISION, verified_at TEXT NOT NULL)`;
     },
 
     // The upsert the whole de-dup fix depends on — Postgres's native
@@ -259,6 +261,23 @@ export function createPostgresBackend(connectionString: string): Backend {
     async setIngestState(key: string, value: string) {
       await sql`INSERT INTO ingest_state (key, value, updated_at) VALUES (${key}, ${value}, ${new Date().toISOString()})
         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`;
+    },
+
+    async getBurnScarVerification(eventId: string) {
+      const rows = await sql`SELECT * FROM burn_scar_verification WHERE event_id = ${eventId}` as { event_id: string; pre_date: string | null; post_date: string | null; dnbr_mean: number | null; classification: BurnScarVerificationRow['classification']; cloud_cover_pre: number | null; cloud_cover_post: number | null; verified_at: string }[];
+      const row = rows[0];
+      if (!row) return undefined;
+      return {
+        eventId: row.event_id, preDate: row.pre_date, postDate: row.post_date, dnbrMean: row.dnbr_mean, classification: row.classification,
+        cloudCoverPre: row.cloud_cover_pre, cloudCoverPost: row.cloud_cover_post, verifiedAt: row.verified_at,
+      };
+    },
+
+    async upsertBurnScarVerification(row: BurnScarVerificationRow) {
+      await sql`INSERT INTO burn_scar_verification (event_id, pre_date, post_date, dnbr_mean, classification, cloud_cover_pre, cloud_cover_post, verified_at)
+        VALUES (${row.eventId}, ${row.preDate}, ${row.postDate}, ${row.dnbrMean}, ${row.classification}, ${row.cloudCoverPre}, ${row.cloudCoverPost}, ${row.verifiedAt})
+        ON CONFLICT (event_id) DO UPDATE SET pre_date = EXCLUDED.pre_date, post_date = EXCLUDED.post_date, dnbr_mean = EXCLUDED.dnbr_mean,
+          classification = EXCLUDED.classification, cloud_cover_pre = EXCLUDED.cloud_cover_pre, cloud_cover_post = EXCLUDED.cloud_cover_post, verified_at = EXCLUDED.verified_at`;
     },
   };
 }

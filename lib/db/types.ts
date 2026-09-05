@@ -66,6 +66,22 @@ export function defaultSourceHealth(source: string): SourceHealthRow {
   return { source, consecutiveFailures: 0, lastSuccessAt: null, lastFailureAt: null, lastError: null, incidentOpenSince: null, lastNotifiedAt: null };
 }
 
+// One row per event that has been checked against Sentinel-2 dNBR imagery
+// (lib/burnscar.ts / scripts/burn-scar-verify.py). classification carries
+// the script's French verdict verbatim; dnbrMean/dates are null when the
+// window had no usable scene (too cloudy / not yet acquired) — the row is
+// still written so the next run knows a check happened at verifiedAt.
+export type BurnScarVerificationRow = {
+  eventId: string;
+  preDate: string | null;
+  postDate: string | null;
+  dnbrMean: number | null;
+  classification: 'confirmé' | 'probable' | 'non confirmé' | 'indéterminé';
+  cloudCoverPre: number | null;
+  cloudCoverPost: number | null;
+  verifiedAt: string;
+};
+
 export interface Backend {
   initDb(): Promise<void>;
   saveSignal(event: FireEvent): Promise<void>;
@@ -103,6 +119,10 @@ export interface Backend {
   // a schema change either.
   getIngestState(key: string): Promise<string | null>;
   setIngestState(key: string, value: string): Promise<void>;
+  // Sentinel-2 dNBR burn-scar verification results (scaffold; populated
+  // only once real Sentinel-2 access is wired — see lib/burnscar.ts).
+  getBurnScarVerification(eventId: string): Promise<BurnScarVerificationRow | undefined>;
+  upsertBurnScarVerification(row: BurnScarVerificationRow): Promise<void>;
 }
 
 // The values this instance already shipped and ran with before /setup or
